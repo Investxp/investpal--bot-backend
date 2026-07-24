@@ -49,6 +49,10 @@ export class PolymarketEngine extends BaseEngine {
     const size = cfg.polymarketSize ?? 10;
     const price = cfg.polymarketPrice ?? 0.5;
     const side = cfg.polymarketSide ?? 'BUY';
+    cfg.polymarketApiKey = cfg.polymarketApiKey || process.env.POLYMARKET_API_KEY;
+    cfg.polymarketApiSecret = cfg.polymarketApiSecret || process.env.POLYMARKET_API_SECRET;
+    cfg.polymarketPassphrase = cfg.polymarketPassphrase || process.env.POLYMARKET_PASSPHRASE;
+    cfg.polymarketPrivateKey = cfg.polymarketPrivateKey || process.env.POLYMARKET_PRIVATE_KEY;
 
     // Check limits
     if (this.limitsHit()) return;

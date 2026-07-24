@@ -43,6 +43,8 @@ export class SXEngine extends BaseEngine {
 
   private async executeRound() {
     const cfg = this.config as SXConfig;
+    cfg.sxPrivateKey = cfg.sxPrivateKey || process.env.SX_PRIVATE_KEY;
+    cfg.sxWalletAddress = cfg.sxWalletAddress || process.env.SX_WALLET_ADDRESS;
     if (this.limitsHit()) return;
 
     store.leg1.isTrading = true;
