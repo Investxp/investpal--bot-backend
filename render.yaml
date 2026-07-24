@@ -11,5 +11,17 @@ services:
         sync: false
       - key: DERIV_TOKEN
         sync: false
+      - key: POLYMARKET_API_KEY
+        sync: false
+      - key: POLYMARKET_API_SECRET
+        sync: false
+      - key: POLYMARKET_PASSPHRASE
+        sync: false
+      - key: POLYMARKET_PRIVATE_KEY
+        sync: false
+      - key: SX_PRIVATE_KEY
+        sync: false
+      - key: SX_WALLET_ADDRESS
+        sync: false
       - key: NODE_VERSION
         value: 22
