@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: investpal-backend
+    runtime: node
+    repo: https://github.com/Investxp/investpal--bot-backend
+    branch: master
+    buildCommand: npm install && npm run build
+    startCommand: node dist/index.js
+    envVars:
+      - key: DERIV_APP_ID
+        sync: false
+      - key: DERIV_TOKEN
+        sync: false
+      - key: NODE_VERSION
+        value: 22
