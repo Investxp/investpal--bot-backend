@@ -29,6 +29,38 @@ export class DerivClient {
     });
   }
 
+  async verifyToken(): Promise<{ valid: boolean; error?: string; loginid?: string }> {
+    const ws = new WebSocket(`${DERIV_WS_URL}?app_id=${this.appId}`);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        ws.close();
+        resolve({ valid: false, error: 'Connection timeout' });
+      }, 10000);
+      ws.on('open', () => {
+        ws.send(JSON.stringify({ authorize: this.token, req_id: 1 }));
+      });
+      ws.on('message', (raw) => {
+        try {
+          const msg = JSON.parse(raw.toString());
+          if (msg.req_id === 1) {
+            clearTimeout(timer);
+            ws.close();
+            if (msg.error) {
+              const isExpired = /expired|invalid|token/i.test(msg.error.message);
+              resolve({ valid: false, error: isExpired ? 'TOKEN_EXPIRED' : msg.error.message });
+            } else {
+              resolve({ valid: true, loginid: msg.authorize?.loginid });
+            }
+          }
+        } catch { /* ignore */ }
+      });
+      ws.on('error', () => {
+        clearTimeout(timer);
+        resolve({ valid: false, error: 'WebSocket error' });
+      });
+    });
+  }
+
   private async authorize(): Promise<void> {
     await this.send({ authorize: this.token });
   }

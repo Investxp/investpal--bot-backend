@@ -39,6 +39,33 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 let engine: ReturnType<typeof createEngine> | null = null;
 let enginePlatform: Platform | null = null;
 
+// ── Token verification (broadcast to all WS clients) ──────────────────
+function broadcastStatus(msg: Record<string, any>) {
+  const json = JSON.stringify(msg);
+  wss.clients.forEach((client) => {
+    if (client.readyState === WsSocket.OPEN) client.send(json);
+  });
+}
+
+async function checkDerivToken() {
+  const appId = process.env.DERIV_APP_ID || '';
+  const token = process.env.DERIV_TOKEN || '';
+  if (!appId || !token) return;
+  const client = new DerivClient(appId, token);
+  const result = await client.verifyToken();
+  if (!result.valid) {
+    const isExpired = result.error === 'TOKEN_EXPIRED';
+    store.addLog(`[Token] Deriv token ${isExpired ? 'EXPIRED' : 'invalid'}: ${result.error}`, 'error');
+    broadcastStatus({ type: 'token_error', data: { expired: isExpired, error: result.error } });
+    if (isExpired) {
+      console.error('WARNING: Deriv API token has expired. Create a new token at https://app.deriv.com/account/api-token');
+    }
+  } else {
+    store.addLog(`[Token] Deriv token valid (${result.loginid})`, 'success');
+    broadcastStatus({ type: 'token_status', data: { valid: true, loginid: result.loginid } });
+  }
+}
+
 // ── REST API ─────────────────────────────────────────────────────────
 app.get('/api/status', (_req, res) => {
   res.json(store.getStatus());
@@ -76,6 +103,19 @@ app.post('/api/start', async (req, res) => {
 app.post('/api/stop', async (_req, res) => {
   if (engine) await engine.stop('User requested stop');
   res.json({ ok: true });
+});
+
+app.get('/api/check-token', async (_req, res) => {
+  try {
+    const appId = process.env.DERIV_APP_ID || '';
+    const token = process.env.DERIV_TOKEN || '';
+    if (!appId || !token) return res.json({ valid: false, error: 'DERIV_APP_ID or DERIV_TOKEN not set' });
+    const client = new DerivClient(appId, token);
+    const result = await client.verifyToken();
+    res.json(result);
+  } catch (err: any) {
+    res.json({ valid: false, error: err.message });
+  }
 });
 
 // Health check
@@ -118,6 +158,7 @@ server.listen(PORT, () => {
   console.log(`Supported platforms: deriv, polymarket, sx, investpal`);
   console.log(`WS endpoint: ws://localhost:${PORT}/ws`);
   console.log(`API: http://localhost:${PORT}/api/status`);
+  checkDerivToken();
 });
 
 // Graceful shutdown
