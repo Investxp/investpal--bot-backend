@@ -588,32 +588,30 @@ export class TradeEngine {
       const tp = cfg.takeProfit;
       const sl = cfg.stopLoss;
       let sold = false;
+      let unsubTicks: (() => void) | null = null;
 
       if (tp > 0 || sl > 0) {
-        const unsub = await this.deriv.subscribeTicks(cfg.symbol, async (tick) => {
+        unsubTicks = await this.deriv.subscribeTicks(cfg.symbol, async (tick) => {
           if (!this.isRunning || sold) return;
           const status = await this.deriv.getContractStatus(contractId).catch(() => null);
           if (!status) return;
           store.leg1.currentStake = status.buyPrice + status.profit;
-          store.stats.totalProfit = (store.stats.totalProfit || 0) + status.profit;
           store.broadcast();
 
           if (tp > 0 && status.profit >= tp) {
             sold = true;
             store.addLog(`[${label}] Take profit $${tp.toFixed(2)} reached`, 'success');
             await this.deriv.sellContract(contractId);
-            this.deriv.disconnect();
           } else if (sl > 0 && status.profit <= -sl) {
             sold = true;
             store.addLog(`[${label}] Stop loss $${sl.toFixed(2)} hit`, 'error');
             await this.deriv.sellContract(contractId);
-            this.deriv.disconnect();
           }
         });
 
         // Wait for result
         const result = await this.deriv.waitForResult(contractId);
-        unsub();
+        if (unsubTicks) unsubTicks();
         store.leg1.activeContractId = null;
         store.leg1.lastResult = result.won ? 'win' : 'loss';
         store.leg1.profit += result.profit;
