@@ -101,10 +101,9 @@ export class DerivClient {
       if (msg.msg_type === 'contract') {
         const handler = this.contractHandlers.get(Number(msg.contract.contract_id));
         if (handler) {
-          handler({
-            won: ['won', 'profit'].includes(msg.contract.status),
-            profit: msg.contract.profit ?? 0,
-          });
+          const status = msg.contract.status;
+          const won = ['won', 'profit', 'sold'].includes(status) && (msg.contract.profit ?? 0) > 0;
+          handler({ won, profit: msg.contract.profit ?? 0 });
           this.contractHandlers.delete(Number(msg.contract.contract_id));
         }
       }
@@ -148,6 +147,8 @@ export class DerivClient {
     digit?: number,
     growthRate?: number,
     barrierOffset?: string,
+    multiplier?: number,
+    payoffAmount?: number,
   ): Promise<string> {
     const payload: Record<string, any> = {
       proposal: 1,
@@ -157,7 +158,16 @@ export class DerivClient {
       currency: 'USD',
       symbol,
     };
-    if (contractType === 'ACCU') {
+    const isMultiplier = ['MULTUP', 'MULTDOWN'].includes(contractType);
+    const isVanilla = ['VANILLALONGCALL', 'VANILLALONGPUT'].includes(contractType);
+
+    if (isMultiplier) {
+      payload.multiplier = multiplier ?? 10;
+    } else if (isVanilla) {
+      if (payoffAmount) payload.payoff_amount = payoffAmount;
+      payload.duration = duration;
+      payload.duration_unit = durationUnit;
+    } else if (contractType === 'ACCU') {
       payload.growth_rate = growthRate ?? 0.01;
     } else {
       payload.duration = duration;
@@ -182,6 +192,27 @@ export class DerivClient {
   async buyContract(proposalId: string, stake: number): Promise<number> {
     const resp = await this.send({ buy: proposalId, price: stake });
     return resp.buy?.contract_id ?? 0;
+  }
+
+  async sellContract(contractId: number, price?: number): Promise<void> {
+    const payload: Record<string, any> = { sell: contractId };
+    if (price !== undefined) payload.price = price;
+    await this.send(payload);
+  }
+
+  async cancelContract(contractId: number): Promise<void> {
+    await this.send({ cancel: contractId });
+  }
+
+  async getContractStatus(contractId: number): Promise<{ status: string; profit: number; buyPrice: number; currentSpot?: number }> {
+    const resp = await this.send({ contract_id: contractId });
+    const c = resp.contract || {};
+    return {
+      status: c.status || 'open',
+      profit: c.profit ?? 0,
+      buyPrice: c.buy_price ?? 0,
+      currentSpot: c.current_spot,
+    };
   }
 
   waitForResult(contractId: number): Promise<{ won: boolean; profit: number }> {

@@ -6,7 +6,10 @@ export type AutoTradeMode =
   | 'rise-only' | 'fall-only' | 'even-only' | 'odd-only' | 'match-only' | 'differ-only'
   | 'over-only' | 'under-only' | 'higher-only' | 'lower-only' | 'touch-only' | 'no-touch-only'
   | 'asian-up-only' | 'asian-down-only' | 'reset-call-only' | 'reset-put-only'
-  | 'ai-auto-combo' | 'ai-auto-individual';
+  | 'ai-auto-combo' | 'ai-auto-individual'
+  | 'ticks' | 'tick-high-only' | 'tick-low-only'
+  | 'vanilla' | 'vanilla-call-only' | 'vanilla-put-only'
+  | 'multipliers' | 'multipliers-up-only' | 'multipliers-down-only';
 
 export interface TradeConfig {
   platform: Platform;
@@ -48,6 +51,9 @@ export interface TradeConfig {
   burstSize?: number;
   recoverySplitCount?: number;
   aiRandomCoolOff?: boolean;
+  multiplier?: number;
+  payoffAmount?: number;
+  dealCancelSeconds?: number;
 }
 
 export interface RunnerState {

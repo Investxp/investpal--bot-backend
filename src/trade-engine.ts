@@ -103,7 +103,12 @@ export class TradeEngine {
     store.broadcast();
 
     // Kick off main loop
-    if (config.isHedgeMode) {
+    const isMultiplier = ['multipliers', 'multipliers-up-only', 'multipliers-down-only'].includes(config.mode);
+
+    if (isMultiplier) {
+      store.addLog('Multiplier mode: monitoring ticks for TP/SL', 'info');
+      this.loopMultiplier();
+    } else if (config.isHedgeMode) {
       store.addLog('Hedge mode: both legs simultaneously', 'info');
       this.loopHedge();
     } else {
@@ -130,6 +135,15 @@ export class TradeEngine {
       'asian-up-down': ['Asian Up', 'ASIANU', 'Asian Down', 'ASIAND'],
       'reset-call-put': ['Reset Call', 'RESETCALL', 'Reset Put', 'RESETPUT'],
       'accumulators': ['Accumulator A', 'ACCU', 'Accumulator B', 'ACCU'],
+      'ticks': ['Tick High', 'TICKHIGH', 'Tick Low', 'TICKLOW'],
+      'tick-high-only': ['Tick High', 'TICKHIGH', 'Tick High', 'TICKHIGH'],
+      'tick-low-only': ['Tick Low', 'TICKLOW', 'Tick Low', 'TICKLOW'],
+      'vanilla': ['Vanilla Call', 'VANILLALONGCALL', 'Vanilla Put', 'VANILLALONGPUT'],
+      'vanilla-call-only': ['Vanilla Call', 'VANILLALONGCALL', 'Vanilla Call', 'VANILLALONGCALL'],
+      'vanilla-put-only': ['Vanilla Put', 'VANILLALONGPUT', 'Vanilla Put', 'VANILLALONGPUT'],
+      'multipliers': ['Multiplier Up', 'MULTUP', 'Multiplier Down', 'MULTDOWN'],
+      'multipliers-up-only': ['Multiplier Up', 'MULTUP', 'Multiplier Up', 'MULTUP'],
+      'multipliers-down-only': ['Multiplier Down', 'MULTDOWN', 'Multiplier Down', 'MULTDOWN'],
     };
     const m = map[mode] ?? ['Leg 1', 'CALL', 'Leg 2', 'PUT'];
     return { leg1Label: m[0], leg1Type: m[1], leg2Label: m[2], leg2Type: m[3] };
@@ -186,6 +200,7 @@ export class TradeEngine {
         state.contractType, stake, cfg.symbol,
         cfg.duration, cfg.durationUnit || 't', digit,
         cfg.growthRate, cfg.barrierOffset,
+        cfg.multiplier, cfg.payoffAmount,
       );
 
       const contractId = await this.deriv.buyContract(propId, stake);
@@ -334,10 +349,12 @@ export class TradeEngine {
 
       store.addLog(`[System] Placing: L1 ($${rs1.toFixed(2)}) & L2 ($${rs2.toFixed(2)})${isTriple ? ` & L3 ($${rs3.toFixed(2)})` : ''}`, 'info');
 
+      const cfgM = cfg.multiplier;
+      const cfgP = cfg.payoffAmount;
       const props = await Promise.all([
-        this.deriv.placeProposal(ct1, rs1, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d1, cfg.growthRate, cfg.barrierOffset),
-        this.deriv.placeProposal(ct2, rs2, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d2, cfg.growthRate, cfg.barrierOffset),
-        ...(isTriple ? [this.deriv.placeProposal(ct3, rs3, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d3, cfg.growthRate, cfg.barrierOffset)] : []),
+        this.deriv.placeProposal(ct1, rs1, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d1, cfg.growthRate, cfg.barrierOffset, cfgM, cfgP),
+        this.deriv.placeProposal(ct2, rs2, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d2, cfg.growthRate, cfg.barrierOffset, cfgM, cfgP),
+        ...(isTriple ? [this.deriv.placeProposal(ct3, rs3, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d3, cfg.growthRate, cfg.barrierOffset, cfgM, cfgP)] : []),
       ]);
 
       const buys = await Promise.all([
@@ -523,6 +540,119 @@ export class TradeEngine {
     else if (leg === 2) this.digitIdx2++;
     else this.digitIdx3++;
     return digit;
+  }
+
+  // ── Multiplier Loop ────────────────────────────────────────────────
+  private async loopMultiplier() {
+    while (this.isRunning) {
+      try {
+        await this.executeMultiplierTrade();
+      } catch (err: any) {
+        store.addLog(`[Multiplier] Error: ${err.message}`, 'error');
+        store.broadcast();
+      }
+    }
+  }
+
+  private async executeMultiplierTrade() {
+    const cfg = this.config;
+    const ct = this.getMultiplierContractType(cfg.mode);
+    const stake = cfg.baseStake;
+    const label = ct === 'MULTUP' ? 'Multiplier Up' : 'Multiplier Down';
+
+    if (!this.checkLimits()) return;
+
+    try {
+      store.addLog(`[${label}] Proposing $${stake.toFixed(2)} at ${cfg.multiplier ?? 10}x`, 'info');
+      store.leg1.isTrading = true;
+      store.leg1.label = label;
+      store.leg1.contractType = ct;
+      store.broadcast();
+
+      const propId = await this.deriv.placeProposal(
+        ct, stake, cfg.symbol, cfg.duration, cfg.durationUnit || 't',
+        undefined, undefined, undefined, cfg.multiplier, cfg.payoffAmount,
+      );
+
+      const contractId = await this.deriv.buyContract(propId, stake);
+      store.leg1.activeContractId = contractId;
+      store.addLog(`[${label}] Bought contract ${contractId}`, 'success');
+      store.broadcast();
+
+      // Deal cancellation if configured
+      if (cfg.dealCancelSeconds && cfg.dealCancelSeconds > 0) {
+        store.addLog(`[${label}] Deal cancellation active: ${cfg.dealCancelSeconds}s`, 'info');
+      }
+
+      // Monitor ticks and sell at TP/SL
+      const tp = cfg.takeProfit;
+      const sl = cfg.stopLoss;
+      let sold = false;
+
+      if (tp > 0 || sl > 0) {
+        const unsub = await this.deriv.subscribeTicks(cfg.symbol, async (tick) => {
+          if (!this.isRunning || sold) return;
+          const status = await this.deriv.getContractStatus(contractId).catch(() => null);
+          if (!status) return;
+          store.leg1.currentStake = status.buyPrice + status.profit;
+          store.stats.totalProfit = (store.stats.totalProfit || 0) + status.profit;
+          store.broadcast();
+
+          if (tp > 0 && status.profit >= tp) {
+            sold = true;
+            store.addLog(`[${label}] Take profit $${tp.toFixed(2)} reached`, 'success');
+            await this.deriv.sellContract(contractId);
+            this.deriv.disconnect();
+          } else if (sl > 0 && status.profit <= -sl) {
+            sold = true;
+            store.addLog(`[${label}] Stop loss $${sl.toFixed(2)} hit`, 'error');
+            await this.deriv.sellContract(contractId);
+            this.deriv.disconnect();
+          }
+        });
+
+        // Wait for result
+        const result = await this.deriv.waitForResult(contractId);
+        unsub();
+        store.leg1.activeContractId = null;
+        store.leg1.lastResult = result.won ? 'win' : 'loss';
+        store.leg1.profit += result.profit;
+        store.stats.totalTrades++;
+        if (result.won) store.stats.wins++; else store.stats.losses++;
+        store.stats.totalProfit += result.profit;
+        store.addLog(`[${label}] ${result.won ? 'WIN' : 'LOSS'} $${result.profit.toFixed(2)}`, result.won ? 'success' : 'error');
+        store.broadcast();
+      } else {
+        // No TP/SL — just wait for expiry
+        const result = await this.deriv.waitForResult(contractId);
+        store.leg1.activeContractId = null;
+        store.leg1.lastResult = result.won ? 'win' : 'loss';
+        store.leg1.profit += result.profit;
+        store.stats.totalTrades++;
+        if (result.won) store.stats.wins++; else store.stats.losses++;
+        store.stats.totalProfit += result.profit;
+        store.addLog(`[${label}] ${result.won ? 'WIN' : 'LOSS'} $${result.profit.toFixed(2)}`, result.won ? 'success' : 'error');
+        store.broadcast();
+      }
+
+      store.leg1.isTrading = false;
+      store.broadcast();
+
+    } catch (err: any) {
+      store.leg1.isTrading = false;
+      store.leg1.activeContractId = null;
+      store.addLog(`[${label}] Error: ${err.message}`, 'error');
+      store.broadcast();
+      await this.sleep(2000);
+    }
+  }
+
+  private getMultiplierContractType(mode: string): string {
+    if (mode === 'multipliers-up-only') return 'MULTUP';
+    if (mode === 'multipliers-down-only') return 'MULTDOWN';
+    // alternating between legs
+    this.multiDigitIdx++;
+    return this.multiDigitIdx % 2 === 1 ? 'MULTUP' : 'MULTDOWN';
   }
 
   private checkLimits(): boolean {
