@@ -17,9 +17,8 @@ function createEngine(platform: Platform) {
   switch (platform) {
     case 'deriv': {
       const appId = process.env.DERIV_APP_ID || '';
-      const token = process.env.DERIV_TOKEN || '';
-      if (!appId || !token) throw new Error('Missing DERIV_APP_ID or DERIV_TOKEN');
-      return new DerivEngine(new DerivClient(appId, token));
+      if (!appId) throw new Error('Missing DERIV_APP_ID');
+      return new DerivEngine(new DerivClient(appId, ''));
     }
     case 'polymarket': return new PolymarketEngine();
     case 'sx': return new SXEngine();
@@ -38,8 +37,9 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 
 let engine: ReturnType<typeof createEngine> | null = null;
 let enginePlatform: Platform | null = null;
+let derivClient: DerivClient | null = null;
 
-// ── Token verification (broadcast to all WS clients) ──────────────────
+// ── Helper: broadcast to all WS clients ────────────────────────────────
 function broadcastStatus(msg: Record<string, any>) {
   const json = JSON.stringify(msg);
   wss.clients.forEach((client) => {
@@ -47,28 +47,32 @@ function broadcastStatus(msg: Record<string, any>) {
   });
 }
 
-async function checkDerivToken() {
-  const appId = process.env.DERIV_APP_ID || '';
-  const token = process.env.DERIV_TOKEN || '';
-  if (!appId || !token) return;
-  const client = new DerivClient(appId, token);
-  const result = await client.verifyToken();
-  if (!result.valid) {
-    const isExpired = result.error === 'TOKEN_EXPIRED';
-    store.addLog(`[Token] Deriv token ${isExpired ? 'EXPIRED' : 'invalid'}: ${result.error}`, 'error');
-    broadcastStatus({ type: 'token_error', data: { expired: isExpired, error: result.error } });
-    if (isExpired) {
-      console.error('WARNING: Deriv API token has expired. Create a new token at https://app.deriv.com/account/api-token');
-    }
-  } else {
-    store.addLog(`[Token] Deriv token valid (${result.loginid})`, 'success');
-    broadcastStatus({ type: 'token_status', data: { valid: true, loginid: result.loginid } });
-  }
-}
-
 // ── REST API ─────────────────────────────────────────────────────────
 app.get('/api/status', (_req, res) => {
   res.json(store.getStatus());
+});
+
+// Initialize Deriv OTP WebSocket connection
+app.post('/api/initialize-connection', async (req, res) => {
+  const { oauthToken, accountId } = req.body;
+  if (!oauthToken || !accountId) {
+    return res.status(400).json({ error: 'oauthToken and accountId required' });
+  }
+  try {
+    const appId = process.env.DERIV_APP_ID || '';
+    if (!appId) return res.status(500).json({ error: 'DERIV_APP_ID not configured' });
+
+    derivClient = new DerivClient(appId, '');
+    await derivClient.initialize(oauthToken, accountId);
+
+    store.addLog('[Connection] Deriv OTP WebSocket connected', 'success');
+    broadcastStatus({ type: 'connection_status', data: { connected: true, accountId } });
+    res.json({ ok: true, connected: true, accountId });
+  } catch (err: any) {
+    store.addLog(`[Connection] Failed: ${err.message}`, 'error');
+    broadcastStatus({ type: 'connection_status', data: { connected: false, error: err.message } });
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/start', async (req, res) => {
@@ -78,17 +82,18 @@ app.post('/api/start', async (req, res) => {
   const config: TradeConfig = req.body;
   const platform: Platform = config.platform || 'deriv';
 
-  try {
-    // Stop previous engine if platform changed
-    if (engine && enginePlatform !== platform) {
-      await engine.stop('Platform switch');
-      engine = null;
-    }
+  // For deriv, ensure OTP connection is initialized
+  if (platform === 'deriv' && (!derivClient || !derivClient.hasOtpUrl)) {
+    return res.status(400).json({ error: 'Deriv connection not initialized. Call /api/initialize-connection first.' });
+  }
 
-    if (!engine || enginePlatform !== platform) {
+  try {
+    if (platform === 'deriv') {
+      engine = new DerivEngine(derivClient!);
+    } else {
       engine = createEngine(platform);
-      enginePlatform = platform;
     }
+    enginePlatform = platform;
 
     engine.start(config).catch((err: Error) => {
       store.addLog(`[System] Engine error: ${err.message}`, 'error');
@@ -106,16 +111,11 @@ app.post('/api/stop', async (_req, res) => {
 });
 
 app.get('/api/check-token', async (_req, res) => {
-  try {
-    const appId = process.env.DERIV_APP_ID || '';
-    const token = process.env.DERIV_TOKEN || '';
-    if (!appId || !token) return res.json({ valid: false, error: 'DERIV_APP_ID or DERIV_TOKEN not set' });
-    const client = new DerivClient(appId, token);
-    const result = await client.verifyToken();
-    res.json(result);
-  } catch (err: any) {
-    res.json({ valid: false, error: err.message });
-  }
+  const appId = process.env.DERIV_APP_ID || '';
+  if (!appId) return res.json({ valid: false, error: 'DERIV_APP_ID not configured' });
+  const connected = derivClient?.connected ?? false;
+  const hasOtp = derivClient?.hasOtpUrl ?? false;
+  res.json({ valid: connected && hasOtp, connected, hasOtpUrl: hasOtp, accountId: derivClient?.accountId });
 });
 
 // Health check
@@ -126,6 +126,7 @@ app.get('/', (_req, res) => {
     version: '1.0.0',
     running: store.isRunning,
     platform: enginePlatform,
+    derivConnected: derivClient?.connected ?? false,
   });
 });
 
@@ -142,7 +143,6 @@ app.get('/health', (_req, res) => {
 wss.on('connection', (ws) => {
   ws.send(JSON.stringify({ type: 'status', data: store.getStatus() }));
 
-  // Ping/pong keep-alive every 25s
   const heartbeat = setInterval(() => {
     if (ws.readyState === WsSocket.OPEN) {
       ws.ping();
@@ -182,7 +182,7 @@ server.listen(PORT, () => {
   console.log(`Supported platforms: deriv, polymarket, sx, investpal`);
   console.log(`WS endpoint: ws://localhost:${PORT}/ws`);
   console.log(`API: http://localhost:${PORT}/api/status`);
-  checkDerivToken();
+  console.log('Use POST /api/initialize-connection to connect to Deriv via OTP');
 });
 
 // Graceful shutdown

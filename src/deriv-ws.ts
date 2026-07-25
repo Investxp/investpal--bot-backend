@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
+import https from 'https';
 
-const DERIV_WS_URL = 'wss://ws.derivws.com/websockets/v3';
+const OTP_API_BASE = 'https://api.derivws.com/trading/v1/options';
 
 export class DerivClient {
   private ws: WebSocket | null = null;
@@ -11,58 +12,82 @@ export class DerivClient {
   private tickHandlers: Set<(tick: { quote: number; epoch: number }) => void> = new Set();
   private proposaHandlers: Set<(proposal: any) => void> = new Set();
   private contractHandlers: Map<number, (result: { won: boolean; profit: number }) => void> = new Map();
+  private otpWsUrl: string | null = null;
+  private currentAccountId: string | null = null;
 
   constructor(appId: string, token: string) {
     this.appId = appId;
     this.token = token;
   }
 
-  async connect(): Promise<void> {
+  get hasOtpUrl(): boolean {
+    return !!this.otpWsUrl;
+  }
+
+  get accountId(): string | null {
+    return this.currentAccountId;
+  }
+
+  private callOtpApi(oauthToken: string, accountId: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(`${DERIV_WS_URL}?app_id=${this.appId}`);
+      const url = new URL(`${OTP_API_BASE}/accounts/${accountId}/otp`);
+      const postData = '';
+      const req = https.request(
+        {
+          hostname: url.hostname,
+          path: url.pathname,
+          method: 'POST',
+          headers: {
+            'Deriv-App-ID': this.appId,
+            'Authorization': `Bearer ${oauthToken}`,
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData),
+          },
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => (body += chunk));
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(body);
+              if (json.data?.url) {
+                this.currentAccountId = accountId;
+                resolve(json.data.url);
+              } else {
+                reject(new Error(json.errors?.[0]?.message || 'No OTP URL returned'));
+              }
+            } catch {
+              reject(new Error('Invalid OTP API response'));
+            }
+          });
+        },
+      );
+      req.on('error', reject);
+      req.write(postData);
+      req.end();
+    });
+  }
+
+  async initialize(oauthToken: string, accountId: string): Promise<void> {
+    const url = await this.callOtpApi(oauthToken, accountId);
+    this.otpWsUrl = url;
+    await this.connect();
+  }
+
+  async connect(): Promise<void> {
+    if (!this.otpWsUrl) {
+      throw new Error('No OTP WebSocket URL. Call initialize() first.');
+    }
+    const url: string = this.otpWsUrl;
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(url);
       this.ws.on('open', () => {
-        this.authorize().then(resolve).catch(reject);
+        resolve();
       });
       this.ws.on('message', (raw) => this.handleMessage(raw.toString()));
       this.ws.on('close', () => this.handleClose());
       this.ws.on('error', (err) => reject(err));
     });
-  }
-
-  async verifyToken(): Promise<{ valid: boolean; error?: string; loginid?: string }> {
-    const ws = new WebSocket(`${DERIV_WS_URL}?app_id=${this.appId}`);
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        ws.close();
-        resolve({ valid: false, error: 'Connection timeout' });
-      }, 10000);
-      ws.on('open', () => {
-        ws.send(JSON.stringify({ authorize: this.token, req_id: 1 }));
-      });
-      ws.on('message', (raw) => {
-        try {
-          const msg = JSON.parse(raw.toString());
-          if (msg.req_id === 1) {
-            clearTimeout(timer);
-            ws.close();
-            if (msg.error) {
-              const isExpired = /expired|invalid|token/i.test(msg.error.message);
-              resolve({ valid: false, error: isExpired ? 'TOKEN_EXPIRED' : msg.error.message });
-            } else {
-              resolve({ valid: true, loginid: msg.authorize?.loginid });
-            }
-          }
-        } catch { /* ignore */ }
-      });
-      ws.on('error', () => {
-        clearTimeout(timer);
-        resolve({ valid: false, error: 'WebSocket error' });
-      });
-    });
-  }
-
-  private async authorize(): Promise<void> {
-    await this.send({ authorize: this.token });
   }
 
   private send<T = any>(msg: Record<string, any>): Promise<T> {
