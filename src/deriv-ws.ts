@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 
-const DERIV_WS_URL = 'wss://ws.deriv.com/websockets/v3';
+const DERIV_WS_URL = 'wss://ws.derivws.com/websockets/v3';
 
 export class DerivClient {
   private ws: WebSocket | null = null;
