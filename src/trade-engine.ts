@@ -38,6 +38,15 @@ export class TradeEngine {
   private async sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
   // ── Stake Calculation ──────────────────────────────────────────────
+  private resolveRecovery(method: string): string {
+    if (method !== 'ai_auto') return method;
+    const t = store.stats.totalTrades;
+    const w = t > 0 ? store.stats.wins / t : 0.5;
+    if (w < 0.4) return 'fibonacci';
+    if (w < 0.5) return 'oscars_grind';
+    return 'martingale';
+  }
+
   private calcStake(method: string, won: boolean, loss: number, base: number, mult: number): number {
     if (!method || method === 'none') {
       return base;
@@ -199,14 +208,14 @@ export class TradeEngine {
         ? this.getNextDigit(cfg.selectedDigit, 1)
         : this.getNextDigit(cfg.selectedDigit2 ?? cfg.selectedDigit, 2);
 
-      const propId = await this.deriv.placeProposal(
+      const propResult = await this.deriv.placeProposal(
         state.contractType, stake, cfg.symbol,
         cfg.duration, cfg.durationUnit || 't', digit,
         cfg.growthRate, cfg.barrierOffset,
         cfg.multiplier,
       );
 
-      const contractId = await this.deriv.buyContract(propId, stake);
+      const contractId = await this.deriv.buyContract(propResult.id, propResult.askPrice);
       state.activeContractId = contractId;
       store.addLog(`[${label}] Bought contract ${contractId}`, 'success');
       store.broadcast();
@@ -241,7 +250,7 @@ export class TradeEngine {
 
       // Next stake
       state.currentStake = this.calcStake(
-        cfg.recoveryMethod || '',
+        this.resolveRecovery(cfg.recoveryMethod || 'ai_auto'),
         result.won, stake, baseStake, cfg.martingaleMultiplier
       );
       if (result.won) this.currentLeg = leg; // stay on winner
@@ -353,16 +362,16 @@ export class TradeEngine {
       store.addLog(`[System] Placing: L1 ($${rs1.toFixed(2)}) & L2 ($${rs2.toFixed(2)})${isTriple ? ` & L3 ($${rs3.toFixed(2)})` : ''}`, 'info');
 
       const cfgM = cfg.multiplier;
-      const props = await Promise.all([
+      const propResults = await Promise.all([
         this.deriv.placeProposal(ct1, rs1, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d1, cfg.growthRate, cfg.barrierOffset, cfgM),
         this.deriv.placeProposal(ct2, rs2, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d2, cfg.growthRate, cfg.barrierOffset, cfgM),
         ...(isTriple ? [this.deriv.placeProposal(ct3, rs3, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d3, cfg.growthRate, cfg.barrierOffset, cfgM)] : []),
       ]);
 
       const buys = await Promise.all([
-        this.deriv.buyContract(props[0], rs1),
-        this.deriv.buyContract(props[1], rs2),
-        ...(isTriple ? [this.deriv.buyContract(props[2], rs3)] : []),
+        this.deriv.buyContract(propResults[0].id, propResults[0].askPrice),
+        this.deriv.buyContract(propResults[1].id, propResults[1].askPrice),
+        ...(isTriple ? [this.deriv.buyContract(propResults[2].id, propResults[2].askPrice)] : []),
       ]);
 
       store.leg1.activeContractId = buys[0];
@@ -404,7 +413,7 @@ export class TradeEngine {
       store.leg1.isTrading = false; store.leg2.isTrading = false; store.leg3.isTrading = false;
 
       // ── Recovery logic ─────────────────────────────────────────────
-      const finalRecovery = cfg.recoveryMethod || '';
+      const finalRecovery = this.resolveRecovery(cfg.recoveryMethod || 'ai_auto');
       let nextStake1 = cfg.baseStake;
       let nextStake2 = b2;
       let nextStake3 = cfg.baseStake;
@@ -571,12 +580,12 @@ export class TradeEngine {
       store.leg1.contractType = ct;
       store.broadcast();
 
-      const propId = await this.deriv.placeProposal(
+      const propResult = await this.deriv.placeProposal(
         ct, stake, cfg.symbol, cfg.duration, cfg.durationUnit || 't',
         undefined, undefined, undefined, cfg.multiplier,
       );
 
-      const contractId = await this.deriv.buyContract(propId, stake);
+      const contractId = await this.deriv.buyContract(propResult.id, propResult.askPrice);
       store.leg1.activeContractId = contractId;
       store.addLog(`[${label}] Bought contract ${contractId}`, 'success');
       store.broadcast();

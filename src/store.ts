@@ -20,8 +20,8 @@ class Store {
       type,
       message,
     };
-    this.logs.push(log);
-    if (this.logs.length > 500) this.logs.shift();
+    this.logs.unshift(log);
+    if (this.logs.length > 500) this.logs.pop();
     this.logWsClients.forEach(fn => fn(log));
     return log;
   }
@@ -30,7 +30,7 @@ class Store {
     return {
       isRunning: this.isRunning,
       stats: this.stats,
-      logs: this.logs.slice(-100),
+      logs: this.logs.slice(0, 100),
       leg1: this.leg1,
       leg2: this.leg2,
       leg3: this.leg3,

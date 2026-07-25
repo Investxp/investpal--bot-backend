@@ -180,10 +180,11 @@ export class DerivClient {
     barrierOffset?: string,
     multiplier?: number,
     selectedTick?: number,
-  ): Promise<string> {
+  ): Promise<{ id: string; askPrice: number }> {
     const isAccu = contractType === 'ACCU';
     const isMultiplier = ['MULTUP', 'MULTDOWN'].includes(contractType);
     const isTick = ['TICKHIGH', 'TICKLOW'].includes(contractType);
+    const isVanilla = ['VANILLALONGCALL', 'VANILLALONGPUT'].includes(contractType);
     const minStake = isAccu ? 1.00 : isMultiplier ? 1.00 : 0.35;
     if (stake < minStake) {
       stake = minStake;
@@ -199,10 +200,19 @@ export class DerivClient {
 
     if (isTick) {
       payload.selected_tick = selectedTick ?? 1;
-      payload.duration = 1;
+      payload.duration = 5;
       payload.duration_unit = 't';
     } else if (isMultiplier) {
       payload.multiplier = multiplier ?? 400;
+    } else if (isVanilla) {
+      payload.duration = duration;
+      payload.duration_unit = durationUnit;
+      const raw = barrierOffset || '+0.00';
+      if (!raw.startsWith('+') && !raw.startsWith('-')) {
+        payload.barrier = contractType === 'VANILLALONGCALL' ? '+' + raw : '-' + raw;
+      } else {
+        payload.barrier = raw;
+      }
     } else if (contractType === 'ACCU') {
       payload.growth_rate = growthRate ?? 0.01;
     } else {
@@ -222,11 +232,11 @@ export class DerivClient {
     }
     const resp = await this.send(payload);
     if (!resp.proposal?.id) throw new Error('No proposal ID');
-    return resp.proposal.id;
+    return { id: resp.proposal.id, askPrice: Number(resp.proposal.ask_price ?? stake) };
   }
 
-  async buyContract(proposalId: string, stake: number): Promise<number> {
-    const resp = await this.send({ buy: proposalId, price: stake });
+  async buyContract(proposalId: string, askPrice: number): Promise<number> {
+    const resp = await this.send({ buy: proposalId, price: askPrice });
     return resp.buy.contract_id;
   }
 
