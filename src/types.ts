@@ -52,7 +52,6 @@ export interface TradeConfig {
   recoverySplitCount?: number;
   aiRandomCoolOff?: boolean;
   multiplier?: number;
-  payoffAmount?: number;
   dealCancelSeconds?: number;
 }
 

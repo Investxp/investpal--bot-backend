@@ -200,7 +200,7 @@ export class TradeEngine {
         state.contractType, stake, cfg.symbol,
         cfg.duration, cfg.durationUnit || 't', digit,
         cfg.growthRate, cfg.barrierOffset,
-        cfg.multiplier, cfg.payoffAmount,
+        cfg.multiplier,
       );
 
       const contractId = await this.deriv.buyContract(propId, stake);
@@ -350,11 +350,10 @@ export class TradeEngine {
       store.addLog(`[System] Placing: L1 ($${rs1.toFixed(2)}) & L2 ($${rs2.toFixed(2)})${isTriple ? ` & L3 ($${rs3.toFixed(2)})` : ''}`, 'info');
 
       const cfgM = cfg.multiplier;
-      const cfgP = cfg.payoffAmount;
       const props = await Promise.all([
-        this.deriv.placeProposal(ct1, rs1, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d1, cfg.growthRate, cfg.barrierOffset, cfgM, cfgP),
-        this.deriv.placeProposal(ct2, rs2, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d2, cfg.growthRate, cfg.barrierOffset, cfgM, cfgP),
-        ...(isTriple ? [this.deriv.placeProposal(ct3, rs3, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d3, cfg.growthRate, cfg.barrierOffset, cfgM, cfgP)] : []),
+        this.deriv.placeProposal(ct1, rs1, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d1, cfg.growthRate, cfg.barrierOffset, cfgM),
+        this.deriv.placeProposal(ct2, rs2, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d2, cfg.growthRate, cfg.barrierOffset, cfgM),
+        ...(isTriple ? [this.deriv.placeProposal(ct3, rs3, cfg.symbol, cfg.duration, cfg.durationUnit || 't', d3, cfg.growthRate, cfg.barrierOffset, cfgM)] : []),
       ]);
 
       const buys = await Promise.all([
@@ -563,7 +562,7 @@ export class TradeEngine {
     if (!this.checkLimits()) return;
 
     try {
-      store.addLog(`[${label}] Proposing $${stake.toFixed(2)} at ${cfg.multiplier ?? 10}x`, 'info');
+      store.addLog(`[${label}] Proposing $${stake.toFixed(2)} at ${cfg.multiplier ?? 400}x`, 'info');
       store.leg1.isTrading = true;
       store.leg1.label = label;
       store.leg1.contractType = ct;
@@ -571,7 +570,7 @@ export class TradeEngine {
 
       const propId = await this.deriv.placeProposal(
         ct, stake, cfg.symbol, cfg.duration, cfg.durationUnit || 't',
-        undefined, undefined, undefined, cfg.multiplier, cfg.payoffAmount,
+        undefined, undefined, undefined, cfg.multiplier,
       );
 
       const contractId = await this.deriv.buyContract(propId, stake);
