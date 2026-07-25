@@ -192,7 +192,7 @@ export class DerivClient {
     const isVanilla = ['VANILLALONGCALL', 'VANILLALONGPUT'].includes(contractType);
 
     if (isMultiplier) {
-      payload.multiplier = multiplier ?? 10;
+      payload.multiplier = multiplier ?? 400;
     } else if (isVanilla) {
       if (payoffAmount) payload.payoff_amount = payoffAmount;
       payload.duration = duration;
