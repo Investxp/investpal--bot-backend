@@ -132,8 +132,8 @@ export class DerivClient {
           const status = contractData.status;
           const isClosed = ['won', 'profit', 'sold', 'lost'].includes(status);
           if (isClosed) {
-            const won = ['won', 'profit', 'sold'].includes(status) && (contractData.profit ?? 0) > 0;
-            handler({ won, profit: contractData.profit ?? 0 });
+            const won = ['won', 'profit', 'sold'].includes(status) && Number(contractData.profit ?? 0) > 0;
+            handler({ won, profit: Number(contractData.profit ?? 0) });
             this.contractHandlers.delete(Number(contractData.contract_id));
           }
         }
@@ -258,12 +258,12 @@ export class DerivClient {
       const pollInterval = setInterval(async () => {
         try {
           const status = await this.getContractStatus(contractId);
-          if (['won', 'profit', 'sold', 'lost'].includes(status.status)) {
-            clearInterval(pollInterval);
-            const won = ['won', 'profit', 'sold'].includes(status.status) && status.profit > 0;
-            const handler = this.contractHandlers.get(contractId);
-            if (handler) {
-              handler({ won, profit: status.profit });
+            if (['won', 'profit', 'sold', 'lost'].includes(status.status)) {
+              clearInterval(pollInterval);
+              const won = ['won', 'profit', 'sold'].includes(status.status) && Number(status.profit) > 0;
+              const handler = this.contractHandlers.get(contractId);
+              if (handler) {
+                handler({ won, profit: Number(status.profit) });
               this.contractHandlers.delete(contractId);
             }
           }
