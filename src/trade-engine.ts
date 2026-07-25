@@ -39,6 +39,9 @@ export class TradeEngine {
 
   // ── Stake Calculation ──────────────────────────────────────────────
   private calcStake(method: string, won: boolean, loss: number, base: number, mult: number): number {
+    if (!method || method === 'none') {
+      return base;
+    }
     if (method === 'reverse_martingale') {
       return won ? Math.round((loss * mult) * 100) / 100 : base;
     }
@@ -238,7 +241,7 @@ export class TradeEngine {
 
       // Next stake
       state.currentStake = this.calcStake(
-        cfg.recoveryMethod || 'martingale',
+        cfg.recoveryMethod || '',
         result.won, stake, baseStake, cfg.martingaleMultiplier
       );
       if (result.won) this.currentLeg = leg; // stay on winner
@@ -401,12 +404,12 @@ export class TradeEngine {
       store.leg1.isTrading = false; store.leg2.isTrading = false; store.leg3.isTrading = false;
 
       // ── Recovery logic ─────────────────────────────────────────────
-      const finalRecovery = cfg.recoveryMethod || 'martingale';
+      const finalRecovery = cfg.recoveryMethod || '';
       let nextStake1 = cfg.baseStake;
       let nextStake2 = b2;
       let nextStake3 = cfg.baseStake;
 
-      if (isTriple) {
+      if (finalRecovery && isTriple) {
         let std1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier);
         let std2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier);
         let std3 = this.calcStake(finalRecovery, w3, rs3, cfg.baseStake, cfg.martingaleMultiplier);
