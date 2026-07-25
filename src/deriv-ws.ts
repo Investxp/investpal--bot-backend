@@ -187,7 +187,7 @@ export class DerivClient {
       basis: 'stake',
       contract_type: contractType,
       currency: 'USD',
-      symbol,
+      underlying_symbol: symbol,
     };
     const isVanilla = ['VANILLALONGCALL', 'VANILLALONGPUT'].includes(contractType);
 
