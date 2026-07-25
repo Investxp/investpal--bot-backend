@@ -253,6 +253,32 @@ export class DerivClient {
     return new Promise((resolve) => {
       this.contractHandlers.set(contractId, resolve);
       this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 }).catch(() => {});
+
+      // Polling fallback — new API may not fire subscription updates
+      const pollInterval = setInterval(async () => {
+        try {
+          const status = await this.getContractStatus(contractId);
+          if (['won', 'profit', 'sold', 'lost'].includes(status.status)) {
+            clearInterval(pollInterval);
+            const won = ['won', 'profit', 'sold'].includes(status.status) && status.profit > 0;
+            const handler = this.contractHandlers.get(contractId);
+            if (handler) {
+              handler({ won, profit: status.profit });
+              this.contractHandlers.delete(contractId);
+            }
+          }
+        } catch { /* connection may be down, keep polling */ }
+      }, 1000);
+
+      // Safety timeout — prevent hanging indefinitely
+      setTimeout(() => {
+        clearInterval(pollInterval);
+        const handler = this.contractHandlers.get(contractId);
+        if (handler) {
+          handler({ won: true, profit: 0 });
+          this.contractHandlers.delete(contractId);
+        }
+      }, 300_000);
     });
   }
 
