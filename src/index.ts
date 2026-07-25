@@ -132,6 +132,13 @@ app.get('/health', (_req, res) => {
 wss.on('connection', (ws) => {
   ws.send(JSON.stringify({ type: 'status', data: store.getStatus() }));
 
+  // Ping/pong keep-alive every 25s
+  const heartbeat = setInterval(() => {
+    if (ws.readyState === WsSocket.OPEN) {
+      ws.ping();
+    }
+  }, 25000);
+
   const onStatus = () => {
     if (ws.readyState === WsSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'status', data: store.getStatus() }));
@@ -147,6 +154,13 @@ wss.on('connection', (ws) => {
   store.subscribeLogs(onLog);
 
   ws.on('close', () => {
+    clearInterval(heartbeat);
+    store.unsubscribe(onStatus);
+    store.unsubscribeLogs(onLog);
+  });
+
+  ws.on('error', () => {
+    clearInterval(heartbeat);
     store.unsubscribe(onStatus);
     store.unsubscribeLogs(onLog);
   });
