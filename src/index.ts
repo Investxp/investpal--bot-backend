@@ -119,6 +119,16 @@ app.get('/api/check-token', async (_req, res) => {
 });
 
 // Health check
+app.get('/', (_req, res) => {
+  res.json({
+    status: 'ok',
+    name: 'InvestPal Bot Engine',
+    version: '1.0.0',
+    running: store.isRunning,
+    platform: enginePlatform,
+  });
+});
+
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
