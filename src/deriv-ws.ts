@@ -150,6 +150,12 @@ export class DerivClient {
     multiplier?: number,
     payoffAmount?: number,
   ): Promise<string> {
+    const isAccu = contractType === 'ACCU';
+    const isMultiplier = ['MULTUP', 'MULTDOWN'].includes(contractType);
+    const minStake = isAccu ? 1.00 : isMultiplier ? 1.00 : 0.35;
+    if (stake < minStake) {
+      stake = minStake;
+    }
     const payload: Record<string, any> = {
       proposal: 1,
       amount: stake,
@@ -158,7 +164,6 @@ export class DerivClient {
       currency: 'USD',
       symbol,
     };
-    const isMultiplier = ['MULTUP', 'MULTDOWN'].includes(contractType);
     const isVanilla = ['VANILLALONGCALL', 'VANILLALONGPUT'].includes(contractType);
 
     if (isMultiplier) {
