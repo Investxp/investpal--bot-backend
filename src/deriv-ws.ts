@@ -123,13 +123,19 @@ export class DerivClient {
       if (msg.msg_type === 'proposal') {
         this.proposaHandlers.forEach(fn => fn(msg));
       }
-      if (msg.msg_type === 'contract') {
-        const handler = this.contractHandlers.get(Number(msg.contract.contract_id));
+      // Handle both legacy (contract) and new API (proposal_open_contract) response types
+      const contractMsg = msg.msg_type === 'proposal_open_contract' ? msg : (msg.msg_type === 'contract' ? msg : null);
+      if (contractMsg) {
+        const contractData = contractMsg.msg_type === 'proposal_open_contract' ? contractMsg.proposal_open_contract : contractMsg.contract;
+        const handler = this.contractHandlers.get(Number(contractData.contract_id));
         if (handler) {
-          const status = msg.contract.status;
-          const won = ['won', 'profit', 'sold'].includes(status) && (msg.contract.profit ?? 0) > 0;
-          handler({ won, profit: msg.contract.profit ?? 0 });
-          this.contractHandlers.delete(Number(msg.contract.contract_id));
+          const status = contractData.status;
+          const isClosed = ['won', 'profit', 'sold', 'lost'].includes(status);
+          if (isClosed) {
+            const won = ['won', 'profit', 'sold'].includes(status) && (contractData.profit ?? 0) > 0;
+            handler({ won, profit: contractData.profit ?? 0 });
+            this.contractHandlers.delete(Number(contractData.contract_id));
+          }
         }
       }
     } catch { /* ignore parse errors */ }
@@ -154,8 +160,8 @@ export class DerivClient {
   }
 
   async getLastDigit(symbol: string): Promise<number> {
-    const resp = await this.send({ ticks: symbol, adjust_to_min: 1 });
-    const tick = resp.tick ?? resp.history?.ticks?.at?.(-1);
+    const resp = await this.send({ ticks: symbol });
+    const tick = resp.tick;
     if (!tick) return 5;
     const quoteStr = tick.quote.toString();
     const dotIdx = quoteStr.indexOf('.');
@@ -221,13 +227,11 @@ export class DerivClient {
 
   async buyContract(proposalId: string, stake: number): Promise<number> {
     const resp = await this.send({ buy: proposalId, price: stake });
-    return resp.buy?.contract_id ?? 0;
+    return resp.buy.contract_id;
   }
 
-  async sellContract(contractId: number, price?: number): Promise<void> {
-    const payload: Record<string, any> = { sell: contractId };
-    if (price !== undefined) payload.price = price;
-    await this.send(payload);
+  async sellContract(contractId: number, price: number = 0): Promise<void> {
+    await this.send({ sell: contractId, price });
   }
 
   async cancelContract(contractId: number): Promise<void> {
@@ -235,12 +239,12 @@ export class DerivClient {
   }
 
   async getContractStatus(contractId: number): Promise<{ status: string; profit: number; buyPrice: number; currentSpot?: number }> {
-    const resp = await this.send({ contract_id: contractId });
-    const c = resp.contract || {};
+    const resp = await this.send({ proposal_open_contract: 1, contract_id: contractId });
+    const c = resp.proposal_open_contract || resp.contract || {};
     return {
       status: c.status || 'open',
-      profit: c.profit ?? 0,
-      buyPrice: c.buy_price ?? 0,
+      profit: Number(c.profit) ?? 0,
+      buyPrice: Number(c.buy_price) ?? 0,
       currentSpot: c.current_spot,
     };
   }
@@ -248,7 +252,7 @@ export class DerivClient {
   waitForResult(contractId: number): Promise<{ won: boolean; profit: number }> {
     return new Promise((resolve) => {
       this.contractHandlers.set(contractId, resolve);
-      this.send({ subscribe: 1, contract_id: contractId }).catch(() => {});
+      this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 }).catch(() => {});
     });
   }
 
