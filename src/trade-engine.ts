@@ -250,7 +250,7 @@ export class TradeEngine {
 
       // Next stake
       state.currentStake = this.calcStake(
-        this.resolveRecovery(cfg.recoveryMethod || 'ai_auto'),
+        this.resolveRecovery(cfg.recoveryMethod || 'martingale'),
         result.won, stake, baseStake, cfg.martingaleMultiplier
       );
       if (result.won) this.currentLeg = leg; // stay on winner
@@ -413,7 +413,7 @@ export class TradeEngine {
       store.leg1.isTrading = false; store.leg2.isTrading = false; store.leg3.isTrading = false;
 
       // ── Recovery logic ─────────────────────────────────────────────
-      const finalRecovery = this.resolveRecovery(cfg.recoveryMethod || 'ai_auto');
+      const finalRecovery = this.resolveRecovery(cfg.recoveryMethod || 'martingale');
       let nextStake1 = cfg.baseStake;
       let nextStake2 = b2;
       let nextStake3 = cfg.baseStake;
