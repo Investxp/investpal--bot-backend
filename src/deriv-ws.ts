@@ -205,8 +205,8 @@ export class DerivClient {
     } else if (isMultiplier) {
       payload.multiplier = multiplier ?? 400;
     } else if (isVanilla) {
-      payload.duration = duration;
-      payload.duration_unit = durationUnit;
+      payload.duration = Math.max(duration, 86400);
+      payload.duration_unit = 's';
       const raw = barrierOffset || '+0.00';
       if (!raw.startsWith('+') && !raw.startsWith('-')) {
         payload.barrier = contractType === 'VANILLALONGCALL' ? '+' + raw : '-' + raw;
@@ -214,7 +214,7 @@ export class DerivClient {
         payload.barrier = raw;
       }
     } else if (contractType === 'ACCU') {
-      payload.growth_rate = growthRate ?? 0.01;
+      payload.growth_rate = Math.max(0.01, Math.min(0.05, growthRate ?? 0.01));
     } else {
       payload.duration = duration;
       payload.duration_unit = durationUnit;
@@ -231,7 +231,7 @@ export class DerivClient {
       }
     }
     const resp = await this.send(payload);
-    if (!resp.proposal?.id) throw new Error('No proposal ID');
+    if (!resp.proposal?.id) throw new Error(`No proposal ID for ${contractType} on ${symbol}. Payload: ${JSON.stringify(payload)}`);
     return { id: resp.proposal.id, askPrice: Number(resp.proposal.ask_price ?? stake) };
   }
 
