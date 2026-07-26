@@ -3,9 +3,13 @@ export type Platform = 'deriv' | 'polymarket' | 'sx' | 'investpal';
 export type AutoTradeMode =
   | 'rise-fall' | 'digits-even-odd' | 'digits-match-differ' | 'digits-over-under'
   | 'accumulators' | 'higher-lower' | 'touch-no-touch' | 'asian-up-down' | 'reset-call-put'
+  | 'turbos' | 'ends-between-outside' | 'stays-between-goes-outside' | 'only-ups-only-downs'
   | 'rise-only' | 'fall-only' | 'even-only' | 'odd-only' | 'match-only' | 'differ-only'
   | 'over-only' | 'under-only' | 'higher-only' | 'lower-only' | 'touch-only' | 'no-touch-only'
   | 'asian-up-only' | 'asian-down-only' | 'reset-call-only' | 'reset-put-only'
+  | 'turbo-long-only' | 'turbo-short-only'
+  | 'ends-between-only' | 'ends-outside-only' | 'stays-between-only' | 'goes-outside-only'
+  | 'only-ups-only' | 'only-downs-only'
   | 'ai-auto-combo' | 'ai-auto-individual'
   | 'ticks' | 'tick-high-only' | 'tick-low-only'
   | 'vanilla' | 'vanilla-call-only' | 'vanilla-put-only'

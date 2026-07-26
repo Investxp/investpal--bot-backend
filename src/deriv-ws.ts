@@ -276,7 +276,7 @@ export class DerivClient {
     const isMultiplier = ['MULTUP', 'MULTDOWN'].includes(contractType);
     const isTick = ['TICKHIGH', 'TICKLOW'].includes(contractType);
     const isVanilla = ['VANILLALONGCALL', 'VANILLALONGPUT'].includes(contractType);
-    const minStake = isAccu ? 1.00 : isMultiplier ? 1.00 : 0.35;
+    const minStake = isAccu ? 1.00 : isMultiplier ? 1.00 : isVanilla ? 0.40 : 0.35;
     if (stake < minStake) {
       stake = minStake;
     }
@@ -328,6 +328,34 @@ export class DerivClient {
       }
     } else if (contractType === 'ACCU') {
       payload.growth_rate = Math.max(0.01, Math.min(0.05, growthRate ?? 0.01));
+    } else if (['TURBOSLONG', 'TURBOSSHORT'].includes(contractType)) {
+      payload.duration = duration;
+      payload.duration_unit = durationUnit;
+      if (barrierOffset) {
+        const raw = barrierOffset;
+        payload.barrier = contractType === 'TURBOSLONG'
+          ? (raw.startsWith('+') || raw.startsWith('-') ? raw : '+' + raw)
+          : (raw.startsWith('+') || raw.startsWith('-') ? raw : '-' + raw);
+      }
+    } else if (['EXPIRYRANGE', 'EXPIRYMISS', 'RANGE', 'UPORDOWN'].includes(contractType)) {
+      payload.duration = duration;
+      payload.duration_unit = durationUnit;
+      if (barrierOffset) {
+        const isPos = barrierOffset.startsWith('+');
+        const isNeg = barrierOffset.startsWith('-');
+        const numVal = parseFloat(barrierOffset.replace(/[+\-]/, ''));
+        if (!isNaN(numVal)) {
+          if (['EXPIRYRANGE', 'RANGE'].includes(contractType)) {
+            // Stays Between / Ends Between: barrier = lower, barrier2 = upper
+            payload.barrier = isNeg ? '-' + numVal.toFixed(2) : '+0.00';
+            payload.barrier2 = isPos ? '+' + numVal.toFixed(2) : '-0.00';
+          } else {
+            // EXPIRYMISS / UPORDOWN: Goes Outside / Ends Outside
+            payload.barrier = isNeg ? '-' + numVal.toFixed(2) : '+0.00';
+            payload.barrier2 = isPos ? '+' + numVal.toFixed(2) : '-0.00';
+          }
+        }
+      }
     } else {
       payload.duration = duration;
       payload.duration_unit = durationUnit;
