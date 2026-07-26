@@ -371,8 +371,16 @@ export class DerivClient {
         }
       }
     }
-    const resp = await this.send(payload);
-    if (!resp.proposal?.id) throw new Error(`No proposal ID for ${contractType} on ${symbol}. Payload: ${JSON.stringify(payload)}`);
+    let resp: any;
+    try {
+      resp = await this.send(payload);
+    } catch (sendErr: any) {
+      throw new Error(`${sendErr.message}. Payload: ${JSON.stringify(payload)}`);
+    }
+    if (!resp.proposal?.id) {
+      const errMsg = resp.error?.message || `No proposal ID for ${contractType} on ${symbol}`;
+      throw new Error(`${errMsg}. Payload: ${JSON.stringify(payload)}`);
+    }
     return { id: resp.proposal.id, askPrice: Number(resp.proposal.ask_price ?? stake) };
   }
 
