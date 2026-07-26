@@ -15,6 +15,16 @@ export class DerivClient {
   private otpWsUrl: string | null = null;
   private currentAccountId: string | null = null;
 
+  // Reconnection state
+  private shouldReconnect = false;
+  private reconnectAttempts = 0;
+  private readonly maxReconnectAttempts = 10;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private oauthToken = '';
+  private accountIdForReconnect = '';
+  private tickSubscriptions: Map<string, Set<(tick: { quote: number; epoch: number }) => void>> = new Map();
+  private onStatusChange: ((connected: boolean, reason?: string) => void) | null = null;
+
   constructor(appId: string, token: string) {
     this.appId = appId;
     this.token = token;
@@ -26,6 +36,10 @@ export class DerivClient {
 
   get accountId(): string | null {
     return this.currentAccountId;
+  }
+
+  setStatusHandler(handler: (connected: boolean, reason?: string) => void) {
+    this.onStatusChange = handler;
   }
 
   private callOtpApi(oauthToken: string, accountId: string): Promise<string> {
@@ -69,24 +83,51 @@ export class DerivClient {
   }
 
   async initialize(oauthToken: string, accountId: string): Promise<void> {
+    this.oauthToken = oauthToken;
+    this.accountIdForReconnect = accountId;
     const url = await this.callOtpApi(oauthToken, accountId);
     this.otpWsUrl = url;
+    this.shouldReconnect = true;
+    this.reconnectAttempts = 0;
     await this.connect();
+    this.onStatusChange?.(true);
   }
 
   async connect(): Promise<void> {
     if (!this.otpWsUrl) {
       throw new Error('No OTP WebSocket URL. Call initialize() first.');
     }
-    const url: string = this.otpWsUrl;
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(url);
-      this.ws.on('open', () => {
+      const ws = new WebSocket(this.otpWsUrl!);
+      let settled = false;
+
+      ws.on('open', () => {
+        settled = true;
+        this.ws = ws;
+        this.reconnectAttempts = 0;
         resolve();
       });
-      this.ws.on('message', (raw) => this.handleMessage(raw.toString()));
-      this.ws.on('close', () => this.handleClose());
-      this.ws.on('error', (err) => reject(err));
+
+      ws.on('error', (err) => {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        } else {
+          ws.close();
+        }
+      });
+
+      ws.on('close', () => {
+        this.ws = null;
+        if (!settled) {
+          settled = true;
+          reject(new Error('WebSocket closed before open'));
+        } else {
+          this.handleClose('Connection lost');
+        }
+      });
+
+      ws.on('message', (raw) => this.handleMessage(raw.toString()));
     });
   }
 
@@ -123,7 +164,6 @@ export class DerivClient {
       if (msg.msg_type === 'proposal') {
         this.proposaHandlers.forEach(fn => fn(msg));
       }
-      // Handle both legacy (contract) and new API (proposal_open_contract) response types
       const contractMsg = msg.msg_type === 'proposal_open_contract' ? msg : (msg.msg_type === 'contract' ? msg : null);
       if (contractMsg) {
         const contractData = contractMsg.msg_type === 'proposal_open_contract' ? contractMsg.proposal_open_contract : contractMsg.contract;
@@ -141,20 +181,71 @@ export class DerivClient {
     } catch { /* ignore parse errors */ }
   }
 
-  private handleClose() {
+  private handleClose(reason = 'WebSocket disconnected') {
     this.pending.forEach(({ reject, timer }) => {
       clearTimeout(timer);
-      reject(new Error('WebSocket disconnected'));
+      reject(new Error(reason));
     });
     this.pending.clear();
     this.ws = null;
+
+    this.onStatusChange?.(false, reason);
+
+    if (this.shouldReconnect) {
+      this.scheduleReconnect();
+    }
+  }
+
+  private scheduleReconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      this.shouldReconnect = false;
+      this.onStatusChange?.(false, 'Max reconnection attempts reached');
+      return;
+    }
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+    this.reconnectAttempts++;
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        await this.connect();
+        await this.resubscribeTicks();
+        this.onStatusChange?.(true);
+      } catch {
+        this.scheduleReconnect();
+      }
+    }, delay);
+  }
+
+  private async resubscribeTicks() {
+    for (const [symbol, handlers] of this.tickSubscriptions) {
+      if (handlers.size > 0) {
+        try {
+          await this.send({ ticks: symbol, subscribe: 1 });
+        } catch { /* symbol may no longer be valid */ }
+      }
+    }
   }
 
   async subscribeTicks(symbol: string, handler: (tick: { quote: number; epoch: number }) => void) {
     this.tickHandlers.add(handler);
+    // Track per-symbol for reconnect re-subscription
+    if (!this.tickSubscriptions.has(symbol)) {
+      this.tickSubscriptions.set(symbol, new Set());
+    }
+    this.tickSubscriptions.get(symbol)!.add(handler);
     await this.send({ ticks: symbol, subscribe: 1 });
     return () => {
       this.tickHandlers.delete(handler);
+      const subs = this.tickSubscriptions.get(symbol);
+      if (subs) {
+        subs.delete(handler);
+        if (subs.size === 0) {
+          this.tickSubscriptions.delete(symbol);
+        }
+      }
       this.send({ forget_all: 'ticks' }).catch(() => {});
     };
   }
@@ -264,7 +355,6 @@ export class DerivClient {
       this.contractHandlers.set(contractId, resolve);
       this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 }).catch(() => {});
 
-      // Polling fallback — new API may not fire subscription updates
       const pollInterval = setInterval(async () => {
         try {
           const status = await this.getContractStatus(contractId);
@@ -280,7 +370,6 @@ export class DerivClient {
         } catch { /* connection may be down, keep polling */ }
       }, 1000);
 
-      // Safety timeout — prevent hanging indefinitely
       setTimeout(() => {
         clearInterval(pollInterval);
         const handler = this.contractHandlers.get(contractId);
@@ -293,6 +382,11 @@ export class DerivClient {
   }
 
   disconnect() {
+    this.shouldReconnect = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.ws?.close();
     this.ws = null;
   }

@@ -63,6 +63,13 @@ app.post('/api/initialize-connection', async (req, res) => {
     if (!appId) return res.status(500).json({ error: 'DERIV_APP_ID not configured' });
 
     derivClient = new DerivClient(appId, '');
+    derivClient.setStatusHandler((connected, reason) => {
+      if (connected) {
+        store.addLog('[Connection] Deriv OTP WebSocket reconnected', 'success');
+      } else if (reason) {
+        store.addLog(`[Connection] Deriv OTP WebSocket disconnected: ${reason}`, 'warn');
+      }
+    });
     await derivClient.initialize(oauthToken, accountId);
 
     store.addLog('[Connection] Deriv OTP WebSocket connected', 'success');
