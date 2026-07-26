@@ -39,6 +39,7 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 let engine: ReturnType<typeof createEngine> | null = null;
 let enginePlatform: Platform | null = null;
 let derivClient: DerivClient | null = null;
+let copyClient: CopyClient | null = null;
 
 // ── Helper: broadcast to all WS clients ────────────────────────────────
 function broadcastStatus(msg: Record<string, any>) {
@@ -115,6 +116,52 @@ app.post('/api/start', async (req, res) => {
 
 app.post('/api/stop', async (_req, res) => {
   if (engine) await engine.stop('User requested stop');
+  res.json({ ok: true });
+});
+
+// ── Copy Trading Bridge ─────────────────────────────────────────────
+app.post('/api/copy-init', async (req, res) => {
+  const { apiToken } = req.body;
+  if (!apiToken) return res.status(400).json({ error: 'apiToken required' });
+  try {
+    if (copyClient) { copyClient.disconnect(); copyClient = null; }
+    const client = new CopyClient();
+    await client.connect(apiToken);
+    copyClient = client;
+    store.addLog(`[CopyBridge] Connected to target account ${client.accountId}`, 'success');
+    res.json({ ok: true, accountId: client.accountId, balance: client.balance });
+  } catch (err: any) {
+    store.addLog(`[CopyBridge] Init failed: ${err.message}`, 'error');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/copy-trade', async (req, res) => {
+  if (!copyClient || !copyClient.connected) {
+    return res.status(400).json({ error: 'Copy client not connected' });
+  }
+  const { type, stake, duration, durationUnit, symbol, barrierDigit } = req.body;
+  if (!type || !stake || !symbol) return res.status(400).json({ error: 'Missing trade params' });
+  try {
+    await copyClient.executeTrade(type, stake, duration, durationUnit, symbol, barrierDigit);
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/copy-status', (_req, res) => {
+  if (!copyClient) return res.json({ connected: false });
+  res.json({
+    connected: copyClient.connected,
+    accountId: copyClient.accountId,
+    balance: copyClient.balance,
+  });
+});
+
+app.post('/api/copy-disconnect', (_req, res) => {
+  if (copyClient) { copyClient.disconnect(); copyClient = null; }
+  store.addLog('[CopyBridge] Disconnected', 'info');
   res.json({ ok: true });
 });
 
