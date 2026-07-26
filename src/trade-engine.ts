@@ -32,6 +32,8 @@ export class TradeEngine {
   private currentLeg: 'leg1' | 'leg2' = 'leg1';
   private dynamicLossLimit = 3;
   private dynamicWinLimit = 3;
+  private consecutiveErrors = 0;
+  private lastTradeTime = 0;
 
   constructor(deriv: DerivClient) { this.deriv = deriv; }
 
@@ -91,6 +93,8 @@ export class TradeEngine {
     this.currentLeg = 'leg1';
     this.dynamicLossLimit = config.coolOffConsecutiveLosses ?? 3;
     this.dynamicWinLimit = config.coolOffConsecutiveWins ?? 3;
+    this.consecutiveErrors = 0;
+    this.lastTradeTime = 0;
     this.lastTickDigit = await this.deriv.getLastDigit(config.symbol).catch(() => 5);
 
     store.reset(config);
@@ -557,10 +561,33 @@ export class TradeEngine {
   private async loopMultiplier() {
     while (this.isRunning) {
       try {
+        // Minimum 5s gap between trades to avoid rate limits
+        const elapsed = Date.now() - this.lastTradeTime;
+        if (elapsed < 5000) {
+          await this.sleep(5000 - elapsed);
+        }
         await this.executeMultiplierTrade();
+        this.lastTradeTime = Date.now();
+        this.consecutiveErrors = 0;
       } catch (err: any) {
+        this.consecutiveErrors++;
         store.addLog(`[Multiplier] Error: ${err.message}`, 'error');
         store.broadcast();
+        if (this.consecutiveErrors >= 10) {
+          this.stop('Too many consecutive errors');
+          break;
+        }
+        // Rate limit or max contracts: backoff longer
+        const msg = (err.message || '').toLowerCase();
+        if (msg.includes('rate limit') || msg.includes('rate_limit')) {
+          store.addLog('[Multiplier] Rate limited — backing off 60s', 'warn');
+          await this.sleep(60000);
+        } else if (msg.includes('cannot hold more than') || msg.includes('max') || msg.includes('limit')) {
+          store.addLog('[Multiplier] Contract limit reached — backing off 120s', 'warn');
+          await this.sleep(120000);
+        } else {
+          await this.sleep(5000);
+        }
       }
     }
   }
@@ -609,14 +636,20 @@ export class TradeEngine {
           store.leg1.currentStake = status.buyPrice + status.profit;
           store.broadcast();
 
-          if (tp > 0 && status.profit >= tp) {
-            sold = true;
-            store.addLog(`[${label}] Take profit $${tp.toFixed(2)} reached`, 'success');
-            await this.deriv.sellContract(contractId);
-          } else if (sl > 0 && status.profit <= -sl) {
-            sold = true;
-            store.addLog(`[${label}] Stop loss $${sl.toFixed(2)} hit`, 'error');
-            await this.deriv.sellContract(contractId);
+          try {
+            if (tp > 0 && status.profit >= tp) {
+              sold = true;
+              store.addLog(`[${label}] Take profit $${tp.toFixed(2)} reached`, 'success');
+              await this.deriv.sellContract(contractId);
+            } else if (sl > 0 && status.profit <= -sl) {
+              sold = true;
+              store.addLog(`[${label}] Stop loss $${sl.toFixed(2)} hit`, 'error');
+              await this.deriv.sellContract(contractId);
+            }
+          } catch (sellErr: any) {
+            sold = false;
+            store.addLog(`[${label}] Sell failed: ${sellErr.message}`, 'error');
+            store.broadcast();
           }
         });
 
@@ -652,7 +685,16 @@ export class TradeEngine {
       store.leg1.activeContractId = null;
       store.addLog(`[${label}] Error: ${err.message}`, 'error');
       store.broadcast();
-      await this.sleep(2000);
+      const msg = (err.message || '').toLowerCase();
+      if (msg.includes('rate limit') || msg.includes('rate_limit')) {
+        store.addLog('[Multiplier] Rate limited — backing off 60s', 'warn');
+        await this.sleep(60000);
+      } else if (msg.includes('cannot hold more than') || msg.includes('limit')) {
+        store.addLog('[Multiplier] Contract limit reached — backing off 120s', 'warn');
+        await this.sleep(120000);
+      } else {
+        await this.sleep(2000);
+      }
     }
   }
 
