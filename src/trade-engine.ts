@@ -49,9 +49,15 @@ export class TradeEngine {
     return 'martingale';
   }
 
-  private calcStake(method: string, won: boolean, loss: number, base: number, mult: number): number {
+  private calcStake(method: string, won: boolean, loss: number, base: number, mult: number, leg: number = 1): number {
     if (!method || method === 'none') {
       return base;
+    }
+    if (method === 'martingale_reverse') {
+      // Leg 1: martingale (↑ on loss), Leg 2: reverse martingale (↑ on win)
+      return leg === 1
+        ? (won ? base : Math.round((loss * mult) * 100) / 100)
+        : (won ? Math.round((loss * mult) * 100) / 100 : base);
     }
     if (method === 'reverse_martingale') {
       return won ? Math.round((loss * mult) * 100) / 100 : base;
@@ -172,9 +178,9 @@ export class TradeEngine {
       'stays-between-goes-outside': ['Stays Between', 'RANGE', 'Goes Outside', 'UPORDOWN'],
       'stays-between-only': ['Stays Between', 'RANGE', 'Stays Between', 'RANGE'],
       'goes-outside-only': ['Goes Outside', 'UPORDOWN', 'Goes Outside', 'UPORDOWN'],
-      'only-ups-only-downs': ['Only Ups', 'ONLYUPS', 'Only Downs', 'ONLYDOWNS'],
-      'only-ups-only': ['Only Ups', 'ONLYUPS', 'Only Ups', 'ONLYUPS'],
-      'only-downs-only': ['Only Downs', 'ONLYDOWNS', 'Only Downs', 'ONLYDOWNS'],
+      'only-ups-only-downs': ['Only Ups', 'ONLYUP', 'Only Downs', 'ONLYDOWN'],
+      'only-ups-only': ['Only Ups', 'ONLYUP', 'Only Ups', 'ONLYUP'],
+      'only-downs-only': ['Only Downs', 'ONLYDOWN', 'Only Downs', 'ONLYDOWN'],
     };
     const m = map[mode] ?? ['Leg 1', 'CALL', 'Leg 2', 'PUT'];
     return { leg1Label: m[0], leg1Type: m[1], leg2Label: m[2], leg2Type: m[3] };
@@ -438,9 +444,9 @@ export class TradeEngine {
       let nextStake3 = cfg.baseStake;
 
       if (finalRecovery && isTriple) {
-        let std1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier);
-        let std2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier);
-        let std3 = this.calcStake(finalRecovery, w3, rs3, cfg.baseStake, cfg.martingaleMultiplier);
+        let std1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1);
+        let std2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier, 2);
+        let std3 = this.calcStake(finalRecovery, w3, rs3, cfg.baseStake, cfg.martingaleMultiplier, 3);
 
         // Equal digit split (no martingale)
         const isEq1 = targets[0]?.startsWith('=') || ct1 === 'DIGITMATCH';
@@ -497,15 +503,15 @@ export class TradeEngine {
           if (this.recoveryDebt <= 0) { this.recoveryDebt = 0; this.recoverySplits = 0; }
           if (!w1 && w2) {
             nextStake1 = cfg.baseStake;
-            nextStake2 = this.calcStake(finalRecovery, false, rs1, b2, cfg.martingaleMultiplier);
+            nextStake2 = this.calcStake(finalRecovery, false, rs1, b2, cfg.martingaleMultiplier, 2);
             if (splitCount > 1) { this.recoveryDebt = nextStake2 * splitCount; this.recoverySplits = splitCount; nextStake2 = Math.round((this.recoveryDebt / this.recoverySplits) * 100) / 100; }
           } else if (w1 && !w2) {
             nextStake1 = cfg.baseStake;
-            nextStake2 = this.calcStake(finalRecovery, false, rs2, b2, cfg.martingaleMultiplier);
+            nextStake2 = this.calcStake(finalRecovery, false, rs2, b2, cfg.martingaleMultiplier, 2);
             if (splitCount > 1) { this.recoveryDebt = nextStake2 * splitCount; this.recoverySplits = splitCount; nextStake2 = Math.round((this.recoveryDebt / this.recoverySplits) * 100) / 100; }
           } else if (!w1 && !w2) {
             nextStake1 = cfg.baseStake;
-            nextStake2 = this.calcStake(finalRecovery, false, rs1 + rs2, b2, cfg.martingaleMultiplier);
+            nextStake2 = this.calcStake(finalRecovery, false, rs1 + rs2, b2, cfg.martingaleMultiplier, 2);
             if (splitCount > 1) { this.recoveryDebt = nextStake2 * splitCount; this.recoverySplits = splitCount; nextStake2 = Math.round((this.recoveryDebt / this.recoverySplits) * 100) / 100; }
           } else {
             nextStake1 = cfg.baseStake; nextStake2 = b2;
@@ -513,12 +519,12 @@ export class TradeEngine {
         }
       } else if (cfg.isAlternateMode) {
         // Intertrade switch
-        if (!w1 && w2) { nextStake1 = cfg.baseStake; nextStake2 = this.calcStake(finalRecovery, false, rs1, b2, cfg.martingaleMultiplier); }
-        else if (w1 && !w2) { nextStake2 = b2; nextStake1 = this.calcStake(finalRecovery, false, rs2, cfg.baseStake, cfg.martingaleMultiplier); }
-        else { nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier); nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier); }
+        if (!w1 && w2) { nextStake1 = cfg.baseStake; nextStake2 = this.calcStake(finalRecovery, false, rs1, b2, cfg.martingaleMultiplier, 2); }
+        else if (w1 && !w2) { nextStake2 = b2; nextStake1 = this.calcStake(finalRecovery, false, rs2, cfg.baseStake, cfg.martingaleMultiplier, 1); }
+        else { nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1); nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier, 2); }
       } else {
-        nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier);
-        nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier);
+        nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1);
+        nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier, 2);
       }
 
       // Splitter

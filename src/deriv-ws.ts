@@ -341,20 +341,20 @@ export class DerivClient {
       payload.duration = duration;
       payload.duration_unit = durationUnit;
       if (barrierOffset) {
-        const isPos = barrierOffset.startsWith('+');
-        const isNeg = barrierOffset.startsWith('-');
-        const numVal = parseFloat(barrierOffset.replace(/[+\-]/, ''));
-        if (!isNaN(numVal)) {
-          if (['EXPIRYRANGE', 'RANGE'].includes(contractType)) {
-            // Stays Between / Ends Between: barrier = lower, barrier2 = upper
-            payload.barrier = isNeg ? '-' + numVal.toFixed(2) : '+0.00';
-            payload.barrier2 = isPos ? '+' + numVal.toFixed(2) : '-0.00';
-          } else {
-            // EXPIRYMISS / UPORDOWN: Goes Outside / Ends Outside
-            payload.barrier = isNeg ? '-' + numVal.toFixed(2) : '+0.00';
-            payload.barrier2 = isPos ? '+' + numVal.toFixed(2) : '-0.00';
-          }
+        const raw = barrierOffset;
+        const isPos = raw.startsWith('+');
+        const isNeg = raw.startsWith('-');
+        const numVal = parseFloat(raw.replace(/[+\-]/, ''));
+        if (!isNaN(numVal) && numVal > 0) {
+          payload.barrier = isNeg ? ('-' + numVal.toFixed(2)) : '+0.00';
+          payload.barrier2 = isPos ? ('+' + numVal.toFixed(2)) : '+0.00';
+        } else {
+          payload.barrier = '+0.00';
+          payload.barrier2 = '+0.01';
         }
+      } else {
+        payload.barrier = '+0.00';
+        payload.barrier2 = '+0.01';
       }
     } else {
       payload.duration = duration;

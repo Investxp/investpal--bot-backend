@@ -32,7 +32,7 @@ export interface TradeConfig {
   isHedgeMode: boolean;
   isAlternateMode: boolean;
   alternateFrequency: number;
-  recoveryMethod?: 'martingale' | 'reverse_martingale' | 'dalembert' | 'fibonacci' | 'oscars_grind' | 'ai_auto';
+  recoveryMethod?: 'martingale' | 'reverse_martingale' | 'dalembert' | 'fibonacci' | 'oscars_grind' | 'ai_auto' | 'martingale_reverse';
   ghostLossThreshold?: number;
   maxTradesLimit?: number;
   trailingProfitLock?: number;
