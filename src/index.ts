@@ -7,6 +7,7 @@ import { DerivEngine } from './deriv-engine.js';
 import { PolymarketEngine } from './polymarket-engine.js';
 import { SXEngine } from './sx-engine.js';
 import { InvestPalEngine } from './investpal-engine.js';
+import { CopyClient } from './copy-client.js';
 import { store } from './store.js';
 import type { TradeConfig, Platform } from './types.js';
 

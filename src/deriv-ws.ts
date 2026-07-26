@@ -236,7 +236,7 @@ export class DerivClient {
       this.tickSubscriptions.set(symbol, new Set());
     }
     this.tickSubscriptions.get(symbol)!.add(handler);
-    await this.send({ ticks: symbol, subscribe: 1 });
+    await this.send({ ticks: symbol, subscribe: 1 }).catch(() => {});
     return () => {
       this.tickHandlers.delete(handler);
       const subs = this.tickSubscriptions.get(symbol);
@@ -303,6 +303,28 @@ export class DerivClient {
         payload.barrier = contractType === 'VANILLALONGCALL' ? '+' + raw : '-' + raw;
       } else {
         payload.barrier = raw;
+      }
+      // Vanilla barriers are dynamic — if invalid, parse available barriers and retry
+      try {
+        const vanillaResp = await this.send(payload);
+        if (!vanillaResp.proposal?.id) throw new Error(`No proposal ID for ${contractType} on ${symbol}. Payload: ${JSON.stringify(payload)}`);
+        return { id: vanillaResp.proposal.id, askPrice: Number(vanillaResp.proposal.ask_price ?? stake) };
+      } catch (vanillaErr: any) {
+        const errMsg = vanillaErr.message || '';
+        const match = errMsg.match(/Barriers available are (.+)\./);
+        if (match) {
+          const barriers: string[] = match[1].split(',').map((b: string) => b.trim());
+          const requested = parseFloat(payload.barrier);
+          const closest = barriers.reduce((prev: string, curr: string) => {
+            const diff = Math.abs(parseFloat(curr) - requested);
+            return diff < Math.abs(parseFloat(prev) - requested) ? curr : prev;
+          });
+          payload.barrier = closest;
+          const retryResp = await this.send(payload);
+          if (!retryResp.proposal?.id) throw new Error(`No proposal ID for ${contractType} on ${symbol}. Payload: ${JSON.stringify(payload)}`);
+          return { id: retryResp.proposal.id, askPrice: Number(retryResp.proposal.ask_price ?? stake) };
+        }
+        throw vanillaErr;
       }
     } else if (contractType === 'ACCU') {
       payload.growth_rate = Math.max(0.01, Math.min(0.05, growthRate ?? 0.01));
