@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 import https from 'https';
 
 const OTP_API_BASE = 'https://api.derivws.com/trading/v1/options';
-const LEGACY_APP_ID = process.env.COPY_APP_ID || '51541';
+const LEGACY_APP_ID = process.env.COPY_APP_ID || '1089';
 
 /**
  * Copy trading client — supports both the new Deriv OTP WebSocket API
