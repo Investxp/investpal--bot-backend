@@ -38,6 +38,7 @@ let engine: ReturnType<typeof createEngine> | null = null;
 let enginePlatform: Platform | null = null;
 let derivClient: DerivClient | null = null;
 const copyPool = new CopyTradingPool();
+store.copyPoolRef = copyPool;
 
 function broadcastStatus(msg: Record<string, any>) {
   const json = JSON.stringify(msg);

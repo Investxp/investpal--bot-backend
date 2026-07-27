@@ -39,6 +39,17 @@ export class TradeEngine {
 
   private async sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
+  // ── Copy Trade Replication ──────────────────────────────────────────
+  private async replicateToFollowers(type: string, stake: number, dur: number, durUnit: string, symbol: string, contractId: number, barrierDigit?: number) {
+    if (store.copyPoolRef && store.getFollowers().some(f => f.active === 1)) {
+      store.copyPoolRef.replicationTrade(0, contractId, type, stake, dur, durUnit, symbol, barrierDigit).catch(() => {});
+    }
+  }
+
+  private async resolveCopyOutcomes(masterContractId: number) {
+    if (store.copyPoolRef) store.copyPoolRef.resolveOutcomes(masterContractId).catch(() => {});
+  }
+
   // ── Stake Calculation ──────────────────────────────────────────────
   private resolveRecovery(method: string): string {
     if (method !== 'ai_auto') return method;
@@ -254,9 +265,11 @@ export class TradeEngine {
       const contractId = await this.deriv.buyContract(propResult.id, propResult.askPrice);
       state.activeContractId = contractId;
       store.addLog(`[${label}] Bought contract ${contractId}`, 'success');
+      this.replicateToFollowers(state.contractType, stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, contractId, digit || undefined).catch(() => {});
       store.broadcast();
 
       const result = await this.deriv.waitForResult(contractId);
+      this.resolveCopyOutcomes(contractId).catch(() => {});
       state.activeContractId = null;
       state.lastResult = result.won ? 'win' : 'loss';
       state.profit += result.profit;
@@ -416,6 +429,9 @@ export class TradeEngine {
       store.addLog(`[Leg 1] Bought ${buys[0]}`, 'success');
       store.addLog(`[Leg 2] Bought ${buys[1]}`, 'success');
       if (isTriple) store.addLog(`[Leg 3] Bought ${buys[2]}`, 'success');
+      this.replicateToFollowers(ct1, rs1, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buys[0], d1 || undefined).catch(() => {});
+      this.replicateToFollowers(ct2, rs2, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buys[1], d2 || undefined).catch(() => {});
+      if (isTriple) this.replicateToFollowers(ct3, rs3, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buys[2], d3 || undefined).catch(() => {});
       store.broadcast();
 
       // Wait for outcomes
@@ -424,6 +440,9 @@ export class TradeEngine {
         this.deriv.waitForResult(buys[1]),
         ...(isTriple ? [this.deriv.waitForResult(buys[2])] : []),
       ]);
+      this.resolveCopyOutcomes(buys[0]).catch(() => {});
+      this.resolveCopyOutcomes(buys[1]).catch(() => {});
+      if (isTriple) this.resolveCopyOutcomes(buys[2]).catch(() => {});
 
       const [p1, w1] = [outcomes[0].profit, outcomes[0].won];
       const [p2, w2] = [outcomes[1].profit, outcomes[1].won];
@@ -671,6 +690,7 @@ export class TradeEngine {
       const contractId = await this.deriv.buyContract(propResult.id, propResult.askPrice);
       store.leg1.activeContractId = contractId;
       store.addLog(`[${label}] Bought contract ${contractId}`, 'success');
+      this.replicateToFollowers(ct, stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, contractId).catch(() => {});
       store.broadcast();
 
       // Deal cancellation if configured
@@ -711,6 +731,7 @@ export class TradeEngine {
 
         // Wait for result
         const result = await this.deriv.waitForResult(contractId);
+        this.resolveCopyOutcomes(contractId).catch(() => {});
         if (unsubTicks) unsubTicks();
         store.leg1.activeContractId = null;
         store.leg1.lastResult = result.won ? 'win' : 'loss';
@@ -723,6 +744,7 @@ export class TradeEngine {
       } else {
         // No TP/SL — just wait for expiry
         const result = await this.deriv.waitForResult(contractId);
+        this.resolveCopyOutcomes(contractId).catch(() => {});
         store.leg1.activeContractId = null;
         store.leg1.lastResult = result.won ? 'win' : 'loss';
         store.leg1.profit += result.profit;
@@ -815,6 +837,8 @@ export class TradeEngine {
       store.leg2.activeContractId = buyDown;
       store.addLog(`[Multiplier Up] Bought ${buyUp}`, 'success');
       store.addLog(`[Multiplier Down] Bought ${buyDown}`, 'success');
+      this.replicateToFollowers('MULTUP', stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buyUp).catch(() => {});
+      this.replicateToFollowers('MULTDOWN', stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buyDown).catch(() => {});
       store.broadcast();
 
       // Deal cancellation
@@ -878,6 +902,8 @@ export class TradeEngine {
         this.deriv.waitForResult(buyUp),
         this.deriv.waitForResult(buyDown),
       ]);
+      this.resolveCopyOutcomes(buyUp).catch(() => {});
+      this.resolveCopyOutcomes(buyDown).catch(() => {});
 
       if (unsubTicks) unsubTicks();
 

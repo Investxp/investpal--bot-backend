@@ -43,10 +43,13 @@ export class Store {
   private wsClients: Set<(data: TradeStatus) => void> = new Set();
   private logWsClients: Set<(log: TradeLog) => void> = new Set();
 
-  // ── Copy trading data ──
+  // ── Copy Trading data ──
   private followers: Map<number, CopyFollower> = new Map();
   private tradeLogs: CopyTradeLog[] = [];
   private fIdCounter = 1;
+
+  // Copy pool reference (set from index.ts)
+  copyPoolRef: { replicationTrade: (...args: any[]) => Promise<void>; resolveOutcomes: (...args: any[]) => Promise<void>; } | null = null;
 
   addLog(message: string, type: TradeLog['type'] = 'info') {
     const log: TradeLog = {
