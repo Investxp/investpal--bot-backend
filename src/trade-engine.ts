@@ -503,7 +503,9 @@ export class TradeEngine {
           if (this.recoveryDebt <= 0) { this.recoveryDebt = 0; this.recoverySplits = 0; }
           if (!w1 && w2) {
             nextStake1 = cfg.baseStake;
-            nextStake2 = Math.round((this.calcStake(finalRecovery, true, rs2, b2, cfg.martingaleMultiplier, 2) + Math.max(0, rs1)) * 100) / 100;
+            // Reverse-style methods scale on "win", martingale-style on "loss"
+            const recWon = finalRecovery === 'reverse_martingale' || finalRecovery === 'martingale_reverse';
+            nextStake2 = this.calcStake(finalRecovery, recWon, rs1, b2, cfg.martingaleMultiplier, 2);
             if (splitCount > 1) { this.recoveryDebt = nextStake2 * splitCount; this.recoverySplits = splitCount; nextStake2 = Math.round((this.recoveryDebt / this.recoverySplits) * 100) / 100; }
           } else if (w1 && !w2) {
             nextStake1 = cfg.baseStake;
@@ -521,10 +523,14 @@ export class TradeEngine {
         // Intertrade switch — route recovery to winner
         if (!w1 && w2) {
           nextStake1 = cfg.baseStake;
-          nextStake2 = this.calcStake(finalRecovery, true, rs2, b2, cfg.martingaleMultiplier, 2) + Math.round(Math.max(0, rs1) * 100) / 100;
+          // Recovery to L2: martingale_reverse leg2 is reverse-style → won=true, martingale → won=false
+          const recWon2 = finalRecovery === 'reverse_martingale' || finalRecovery === 'martingale_reverse';
+          nextStake2 = this.calcStake(finalRecovery, recWon2, rs1, b2, cfg.martingaleMultiplier, 2);
         } else if (w1 && !w2) {
           nextStake2 = b2;
-          nextStake1 = this.calcStake(finalRecovery, true, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1) + Math.round(Math.max(0, rs2) * 100) / 100;
+          // Recovery to L1: martingale_reverse leg1 is martingale-style → won=false, reverse_martingale → won=true
+          const recWon1 = finalRecovery === 'reverse_martingale';
+          nextStake1 = this.calcStake(finalRecovery, recWon1, rs2, cfg.baseStake, cfg.martingaleMultiplier, 1);
         } else {
           nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1);
           nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier, 2);
