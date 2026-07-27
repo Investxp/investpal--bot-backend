@@ -1,8 +1,12 @@
 import WebSocket from 'ws';
+import https from 'https';
+
+const OTP_API_BASE = 'https://api.derivws.com/trading/v1/options';
+const LEGACY_APP_ID = process.env.COPY_APP_ID || '51541';
 
 /**
- * Server-side copy trading client using legacy Deriv v3 WS (PAT-based).
- * Migrated from browser-side WS to backend-managed connection for reliability.
+ * Copy trading client — supports both the new Deriv OTP WebSocket API
+ * (OAuth2 token) and legacy v3 WS (PAT token).
  */
 export class CopyClient {
   private ws: WebSocket | null = null;
@@ -11,24 +15,78 @@ export class CopyClient {
   private _connected = false;
   private _accountId: string | null = null;
   private _balance: number | null = null;
-  private apiToken = '';
 
   get connected() { return this._connected; }
   get accountId() { return this._accountId; }
   get balance() { return this._balance; }
 
-  private get appId() {
-    return process.env.DERIV_APP_ID || '';
+  /**
+   * Connect using either:
+   * - OAuth2 flow (new API): provide `oauthToken` + `accountId` (e.g. CR1234567)
+   * - PAT flow (legacy): provide `apiToken` (PAT token like pat_...)
+   */
+  async connect(opts: { oauthToken?: string; accountId?: string; apiToken?: string }): Promise<void> {
+    const { oauthToken, accountId, apiToken } = opts;
+
+    if (apiToken) {
+      // Legacy v3 WS with PAT token
+      return this.connectLegacy(apiToken);
+    }
+
+    if (!oauthToken || !accountId) {
+      throw new Error('Provide either an apiToken (PAT) or oauthToken + accountId');
+    }
+
+    // New OTP flow
+    const wsUrl = await this.callOtpApi(oauthToken, accountId);
+    await this.connectTo(wsUrl);
+    this._connected = true;
   }
 
-  async connect(apiToken: string): Promise<void> {
-    this.apiToken = apiToken;
-    const appId = this.appId;
-    if (!appId) throw new Error('DERIV_APP_ID not configured');
+  private async callOtpApi(oauthToken: string, accountId: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const url = new URL(`${OTP_API_BASE}/accounts/${accountId}/otp`);
+      const postData = '';
+      const req = https.request(
+        {
+          hostname: url.hostname,
+          path: url.pathname,
+          method: 'POST',
+          headers: {
+            'Deriv-App-ID': LEGACY_APP_ID,
+            'Authorization': `Bearer ${oauthToken}`,
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData),
+          },
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => (body += chunk));
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(body);
+              if (json.data?.url) {
+                this._accountId = accountId;
+                resolve(json.data.url);
+              } else {
+                reject(new Error(json.errors?.[0]?.message || 'No OTP URL returned'));
+              }
+            } catch {
+              reject(new Error('Invalid OTP API response'));
+            }
+          });
+        },
+      );
+      req.on('error', reject);
+      req.write(postData);
+      req.end();
+    });
+  }
 
+  private async connectLegacy(apiToken: string): Promise<void> {
     const endpoints = [
-      `wss://ws.derivws.com/websockets/v3?app_id=${appId}&l=EN&brand=deriv`,
-      `wss://ws.binaryws.com/websockets/v3?app_id=${appId}&l=EN&brand=deriv`,
+      `wss://ws.derivws.com/websockets/v3?app_id=${LEGACY_APP_ID}&l=EN&brand=deriv`,
+      `wss://ws.binaryws.com/websockets/v3?app_id=${LEGACY_APP_ID}&l=EN&brand=deriv`,
     ];
 
     let lastErr: Error | null = null;
@@ -43,12 +101,10 @@ export class CopyClient {
     }
     if (lastErr) throw lastErr;
 
-    // Authorize
     const authResp = await this.send({ authorize: apiToken });
     if (authResp.error) throw new Error(authResp.error.message || 'Authorization failed');
     this._accountId = authResp.authorize?.loginid || null;
 
-    // Get balance
     const balResp = await this.send({ balance: 1 });
     this._balance = balResp.balance?.balance ?? null;
     this._connected = true;

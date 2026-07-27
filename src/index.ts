@@ -121,12 +121,14 @@ app.post('/api/stop', async (_req, res) => {
 
 // ── Copy Trading Bridge ─────────────────────────────────────────────
 app.post('/api/copy-init', async (req, res) => {
-  const { apiToken } = req.body;
-  if (!apiToken) return res.status(400).json({ error: 'apiToken required' });
+  const { apiToken, oauthToken, accountId } = req.body;
+  if (!apiToken && (!oauthToken || !accountId)) {
+    return res.status(400).json({ error: 'Provide either apiToken (PAT) or oauthToken + accountId' });
+  }
   try {
     if (copyClient) { copyClient.disconnect(); copyClient = null; }
     const client = new CopyClient();
-    await client.connect(apiToken);
+    await client.connect({ apiToken, oauthToken, accountId });
     copyClient = client;
     store.addLog(`[CopyBridge] Connected to target account ${client.accountId}`, 'success');
     res.json({ ok: true, accountId: client.accountId, balance: client.balance });
