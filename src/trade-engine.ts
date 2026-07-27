@@ -449,15 +449,24 @@ export class TradeEngine {
       store.leg1.isTrading = false; store.leg2.isTrading = false; store.leg3.isTrading = false;
 
       // ── Recovery logic ─────────────────────────────────────────────
+      const legMult = (leg: number): number => {
+        if ((leg === 2 || leg === 3) && cfg.multiplierMode && cfg.multiplierMode !== 'fixed' && cfg.martingaleMultiplier2) return cfg.martingaleMultiplier2;
+        return cfg.martingaleMultiplier;
+      };
+      const recoveryMult = (winLeg: number): number => {
+        if (cfg.multiplierMode === 'auto-max') return Math.max(cfg.martingaleMultiplier, cfg.martingaleMultiplier2 || cfg.martingaleMultiplier);
+        if (cfg.multiplierMode === 'biased') return cfg.biasedMultiplier || cfg.martingaleMultiplier;
+        return legMult(winLeg);
+      };
       const finalRecovery = this.resolveRecovery(cfg.recoveryMethod || 'martingale');
       let nextStake1 = cfg.baseStake;
       let nextStake2 = b2;
       let nextStake3 = cfg.baseStake;
 
       if (finalRecovery && isTriple) {
-        let std1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1);
-        let std2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier, 2);
-        let std3 = this.calcStake(finalRecovery, w3, rs3, cfg.baseStake, cfg.martingaleMultiplier, 3);
+        let std1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, legMult(1), 1);
+        let std2 = this.calcStake(finalRecovery, w2, rs2, b2, legMult(2), 2);
+        let std3 = this.calcStake(finalRecovery, w3, rs3, cfg.baseStake, legMult(3), 3);
 
         // Equal digit split (no martingale)
         const isEq1 = targets[0]?.startsWith('=') || ct1 === 'DIGITMATCH';
@@ -516,15 +525,15 @@ export class TradeEngine {
             nextStake1 = cfg.baseStake;
             // Reverse-style methods scale on "win", martingale-style on "loss"
             const recWon = finalRecovery === 'reverse_martingale' || finalRecovery === 'martingale_reverse';
-            nextStake2 = this.calcStake(finalRecovery, recWon, rs1, b2, cfg.martingaleMultiplier, 2);
+            nextStake2 = this.calcStake(finalRecovery, recWon, rs1, b2, recoveryMult(2), 2);
             if (splitCount > 1) { this.recoveryDebt = nextStake2 * splitCount; this.recoverySplits = splitCount; nextStake2 = Math.round((this.recoveryDebt / this.recoverySplits) * 100) / 100; }
           } else if (w1 && !w2) {
             nextStake1 = cfg.baseStake;
-            nextStake2 = this.calcStake(finalRecovery, false, rs2, b2, cfg.martingaleMultiplier, 2);
+            nextStake2 = this.calcStake(finalRecovery, false, rs2, b2, legMult(2), 2);
             if (splitCount > 1) { this.recoveryDebt = nextStake2 * splitCount; this.recoverySplits = splitCount; nextStake2 = Math.round((this.recoveryDebt / this.recoverySplits) * 100) / 100; }
           } else if (!w1 && !w2) {
             nextStake1 = cfg.baseStake;
-            nextStake2 = this.calcStake(finalRecovery, false, rs1 + rs2, b2, cfg.martingaleMultiplier, 2);
+            nextStake2 = this.calcStake(finalRecovery, false, rs1 + rs2, b2, recoveryMult(2), 2);
             if (splitCount > 1) { this.recoveryDebt = nextStake2 * splitCount; this.recoverySplits = splitCount; nextStake2 = Math.round((this.recoveryDebt / this.recoverySplits) * 100) / 100; }
           } else {
             nextStake1 = cfg.baseStake; nextStake2 = b2;
@@ -536,21 +545,21 @@ export class TradeEngine {
           nextStake1 = cfg.baseStake;
           // Recovery to L2: martingale_reverse leg2 is reverse-style → won=true, martingale → won=false
           const recWon2 = finalRecovery === 'reverse_martingale' || finalRecovery === 'martingale_reverse';
-          nextStake2 = this.calcStake(finalRecovery, recWon2, rs1, b2, cfg.martingaleMultiplier, 2);
+          nextStake2 = this.calcStake(finalRecovery, recWon2, rs1, b2, recoveryMult(2), 2);
         } else if (w1 && !w2) {
           nextStake2 = b2;
           // Recovery to L1: martingale_reverse leg1 is martingale-style → won=false, reverse_martingale → won=true
           const recWon1 = finalRecovery === 'reverse_martingale';
-          nextStake1 = this.calcStake(finalRecovery, recWon1, rs2, cfg.baseStake, cfg.martingaleMultiplier, 1);
+          nextStake1 = this.calcStake(finalRecovery, recWon1, rs2, cfg.baseStake, recoveryMult(1), 1);
         } else {
-          nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1);
-          nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier, 2);
+          nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, legMult(1), 1);
+          nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, legMult(2), 2);
         }
         nextStake1 = Math.round(nextStake1 * 100) / 100;
         nextStake2 = Math.round(nextStake2 * 100) / 100;
       } else {
-        nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1);
-        nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier, 2);
+        nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, legMult(1), 1);
+        nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, legMult(2), 2);
       }
 
       // Splitter

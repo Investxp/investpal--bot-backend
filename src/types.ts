@@ -58,6 +58,9 @@ export interface TradeConfig {
   multiplier?: number;
   dealCancelSeconds?: number;
   reverseLossStyle?: 'flat' | 'step' | 'scale';
+  multiplierMode?: 'fixed' | 'separate' | 'auto-max' | 'biased';
+  martingaleMultiplier2?: number;
+  biasedMultiplier?: number;
 }
 
 export interface RunnerState {
