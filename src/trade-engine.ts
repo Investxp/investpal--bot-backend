@@ -503,7 +503,7 @@ export class TradeEngine {
           if (this.recoveryDebt <= 0) { this.recoveryDebt = 0; this.recoverySplits = 0; }
           if (!w1 && w2) {
             nextStake1 = cfg.baseStake;
-            nextStake2 = this.calcStake(finalRecovery, false, rs1, b2, cfg.martingaleMultiplier, 2);
+            nextStake2 = Math.round((this.calcStake(finalRecovery, true, rs2, b2, cfg.martingaleMultiplier, 2) + Math.max(0, rs1)) * 100) / 100;
             if (splitCount > 1) { this.recoveryDebt = nextStake2 * splitCount; this.recoverySplits = splitCount; nextStake2 = Math.round((this.recoveryDebt / this.recoverySplits) * 100) / 100; }
           } else if (w1 && !w2) {
             nextStake1 = cfg.baseStake;
@@ -518,10 +518,19 @@ export class TradeEngine {
           }
         }
       } else if (cfg.isAlternateMode) {
-        // Intertrade switch
-        if (!w1 && w2) { nextStake1 = cfg.baseStake; nextStake2 = this.calcStake(finalRecovery, false, rs1, b2, cfg.martingaleMultiplier, 2); }
-        else if (w1 && !w2) { nextStake2 = b2; nextStake1 = this.calcStake(finalRecovery, false, rs2, cfg.baseStake, cfg.martingaleMultiplier, 1); }
-        else { nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1); nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier, 2); }
+        // Intertrade switch — route recovery to winner
+        if (!w1 && w2) {
+          nextStake1 = cfg.baseStake;
+          nextStake2 = this.calcStake(finalRecovery, true, rs2, b2, cfg.martingaleMultiplier, 2) + Math.round(Math.max(0, rs1) * 100) / 100;
+        } else if (w1 && !w2) {
+          nextStake2 = b2;
+          nextStake1 = this.calcStake(finalRecovery, true, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1) + Math.round(Math.max(0, rs2) * 100) / 100;
+        } else {
+          nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1);
+          nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier, 2);
+        }
+        nextStake1 = Math.round(nextStake1 * 100) / 100;
+        nextStake2 = Math.round(nextStake2 * 100) / 100;
       } else {
         nextStake1 = this.calcStake(finalRecovery, w1, rs1, cfg.baseStake, cfg.martingaleMultiplier, 1);
         nextStake2 = this.calcStake(finalRecovery, w2, rs2, b2, cfg.martingaleMultiplier, 2);
