@@ -54,13 +54,24 @@ export class TradeEngine {
       return base;
     }
     if (method === 'martingale_reverse') {
-      // Leg 1: martingale (↑ on loss), Leg 2: reverse martingale (↑ on win)
-      return leg === 1
-        ? (won ? base : Math.round((loss * mult) * 100) / 100)
-        : (won ? Math.round((loss * mult) * 100) / 100 : base);
+      if (leg === 1) {
+        return won ? base : Math.round((loss * mult) * 100) / 100;
+      }
+      // Leg 2: reverse martingale — use reverseLossStyle on loss
+      if (won) return Math.round((loss * mult) * 100) / 100;
+      const ls = this.config.reverseLossStyle;
+      if (ls === 'scale') return Math.round((loss * mult) * 100) / 100;
+      if (ls === 'step') return Math.round((loss + base) * 100) / 100;
+      if (ls === 'flat') return loss;
+      return base;
     }
     if (method === 'reverse_martingale') {
-      return won ? Math.round((loss * mult) * 100) / 100 : base;
+      if (won) return Math.round((loss * mult) * 100) / 100;
+      const ls = this.config.reverseLossStyle;
+      if (ls === 'scale') return Math.round((loss * mult) * 100) / 100;
+      if (ls === 'step') return Math.round((loss + base) * 100) / 100;
+      if (ls === 'flat') return loss;
+      return base;
     }
     if (method === 'dalembert') {
       if (won) return Math.max(base, Math.round((loss - base) * 100) / 100);

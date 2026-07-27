@@ -57,6 +57,7 @@ export interface TradeConfig {
   aiRandomCoolOff?: boolean;
   multiplier?: number;
   dealCancelSeconds?: number;
+  reverseLossStyle?: 'flat' | 'step' | 'scale';
 }
 
 export interface RunnerState {
