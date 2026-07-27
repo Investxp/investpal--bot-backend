@@ -26,7 +26,7 @@ export class DerivClient {
   private onStatusChange: ((connected: boolean, reason?: string) => void) | null = null;
 
   constructor(appId: string, token: string) {
-    this.appId = appId;
+    this.appId = appId || process.env.DERIV_OAUTH_CLIENT_ID || process.env.DERIV_APP_ID || '019eb681-1505-7bc3-991a-65e6b76a60a4';
     this.token = token;
   }
 

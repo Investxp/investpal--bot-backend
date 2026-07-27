@@ -3,7 +3,8 @@ import https from 'https';
 import { store } from './store.js';
 
 const OTP_API_BASE = 'https://api.derivws.com/trading/v1/options';
-const LEGACY_APP_ID = process.env.COPY_APP_ID || '1089';
+const WS_LEGACY_APP_ID = process.env.COPY_APP_ID || '1089';
+const OAUTH_CLIENT_ID = process.env.DERIV_OAUTH_CLIENT_ID || process.env.DERIV_APP_ID || '019eb681-1505-7bc3-991a-65e6b76a60a4';
 
 class CopyClient {
   private ws: WebSocket | null = null;
@@ -34,7 +35,7 @@ class CopyClient {
       const postData = '';
       const req = https.request({
         hostname: url.hostname, path: url.pathname, method: 'POST',
-        headers: { 'Deriv-App-ID': LEGACY_APP_ID, 'Authorization': `Bearer ${oauthToken}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+        headers: { 'Deriv-App-ID': OAUTH_CLIENT_ID, 'Authorization': `Bearer ${oauthToken}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
       }, (res) => {
         let body = '';
         res.on('data', (chunk) => (body += chunk));
@@ -42,8 +43,10 @@ class CopyClient {
           try {
             const json = JSON.parse(body);
             if (json.data?.url) { this._accountId = accountId; resolve(json.data.url); }
-            else reject(new Error(json.errors?.[0]?.message || 'No OTP URL returned'));
-          } catch { reject(new Error('Invalid OTP API response')); }
+            else reject(new Error(json.errors?.[0]?.message || `No OTP URL (HTTP ${res.statusCode}). Response: ${body.slice(0, 200)}`));
+          } catch {
+            reject(new Error(`Invalid OTP API response (HTTP ${res.statusCode}): ${body.slice(0, 200)}`));
+          }
         });
       });
       req.on('error', reject);
@@ -54,8 +57,8 @@ class CopyClient {
 
   private async connectLegacy(apiToken: string): Promise<void> {
     const endpoints = [
-      `wss://ws.derivws.com/websockets/v3?app_id=${LEGACY_APP_ID}&l=EN&brand=deriv`,
-      `wss://ws.binaryws.com/websockets/v3?app_id=${LEGACY_APP_ID}&l=EN&brand=deriv`,
+      `wss://ws.derivws.com/websockets/v3?app_id=${WS_LEGACY_APP_ID}&l=EN&brand=deriv`,
+      `wss://ws.binaryws.com/websockets/v3?app_id=${WS_LEGACY_APP_ID}&l=EN&brand=deriv`,
     ];
     let lastErr: Error | null = null;
     for (const url of endpoints) {
