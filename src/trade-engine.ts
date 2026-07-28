@@ -1072,10 +1072,10 @@ export class TradeEngine {
   private async executeMDRecoveryRound() {
     if (!this.isRunning || !this.mdRecoveryActive) return;
     const cfg = this.config;
-    const mode = cfg.mdRecoveryMode ?? 'differ_only';
+    const mode = cfg.mdRecoveryMode ?? 'over_under';
     const factor = cfg.mdRecoveryMartingaleFactor ?? 2;
-    const waitTicks = cfg.mdRecoveryTickWait ?? 3;
-    const analysisWindow = cfg.mdRecoveryAnalysisWindow ?? 5;
+    const waitTicks = cfg.mdRecoveryTickWait ?? 1;
+    const analysisWindow = cfg.mdRecoveryAnalysisWindow ?? 1;
 
     // Calculate stake: total loss × martingale factor
     const mdStake = Math.max(cfg.baseStake, Math.round((this.mdLossAccumulator * factor) * 100) / 100);
@@ -1117,11 +1117,70 @@ export class TradeEngine {
           this.mdRecoveryActive = false;
           this.consecutiveLosses = 0;
           this.mdLossAccumulator = 0;
-          // Restore original contract type
           const { leg1Type } = this.getLabels(cfg.mode);
           store.leg1.contractType = leg1Type;
           store.leg1.label = this.getLabels(cfg.mode).leg1Label;
         } else {
+          this.mdLossAccumulator += Math.abs(result.profit);
+          this.mdRoundsRemaining--;
+          store.addLog(`[MD Recovery] LOSS $${result.profit.toFixed(2)} — ${this.mdRoundsRemaining} rounds remaining`, 'error');
+          if (this.mdRoundsRemaining <= 0) {
+            this.stop('[MD Recovery] Max rounds reached');
+            this.mdRecoveryActive = false;
+          }
+        }
+      } else if (mode === 'over_under') {
+        // Place OVER 5 + UNDER 5 simultaneously — covers digits 0-4 and 6-9 (9/10 outcomes)
+        const [overProp, underProp] = await Promise.all([
+          this.deriv.placeProposal('DIGITOVER', mdStake, cfg.symbol, 1, 't', 5),
+          this.deriv.placeProposal('DIGITUNDER', mdStake, cfg.symbol, 1, 't', 5),
+        ]);
+        const [overId, underId] = await Promise.all([
+          this.deriv.buyContract(overProp.id, overProp.askPrice),
+          this.deriv.buyContract(underProp.id, underProp.askPrice),
+        ]);
+        store.leg1.activeContractId = overId;
+        store.leg2.activeContractId = underId;
+        store.leg1.label = 'MD Over 5';
+        store.leg2.label = 'MD Under 5';
+        store.broadcast();
+
+        this.replicateToFollowers('DIGITOVER', mdStake, 1, 't', cfg.symbol, overId, 5).catch(() => {});
+        this.replicateToFollowers('DIGITUNDER', mdStake, 1, 't', cfg.symbol, underId, 5).catch(() => {});
+
+        const [overResult, underResult] = await Promise.all([
+          this.deriv.waitForResult(overId),
+          this.deriv.waitForResult(underId),
+        ]);
+        this.resolveCopyOutcomes(overId).catch(() => {});
+        this.resolveCopyOutcomes(underId).catch(() => {});
+
+        store.leg1.activeContractId = null;
+        store.leg2.activeContractId = null;
+        const roundNet = overResult.profit + underResult.profit;
+        store.stats.totalTrades += 2;
+        store.stats.totalProfit += roundNet;
+        store.leg1.profit += overResult.profit;
+        store.leg2.profit += underResult.profit;
+
+        if (overResult.won || underResult.won) {
+          store.addLog(`[MD Recovery] Round net: $${roundNet.toFixed(2)} (Over: ${overResult.won ? 'W' : 'L'} / Under: ${underResult.won ? 'W' : 'L'}) — resuming`, 'success');
+          this.mdRecoveryActive = false;
+          this.consecutiveLosses = 0;
+          this.mdLossAccumulator = 0;
+          const labels = this.getLabels(cfg.mode);
+          store.leg1.contractType = labels.leg1Type; store.leg1.label = labels.leg1Label;
+          store.leg2.contractType = labels.leg2Type; store.leg2.label = labels.leg2Label;
+        } else {
+          this.mdLossAccumulator += Math.abs(roundNet);
+          this.mdRoundsRemaining--;
+          store.addLog(`[MD Recovery] Both lost (digit=5!) — $${roundNet.toFixed(2)}, ${this.mdRoundsRemaining} rounds left`, 'error');
+          if (this.mdRoundsRemaining <= 0) {
+            this.stop('[MD Recovery] Max rounds reached');
+            this.mdRecoveryActive = false;
+          }
+        }
+      } else {
           this.mdLossAccumulator += Math.abs(result.profit);
           this.mdRoundsRemaining--;
           store.addLog(`[MD Recovery] LOSS $${result.profit.toFixed(2)} — ${this.mdRoundsRemaining} rounds remaining`, 'error');

@@ -64,7 +64,7 @@ export interface TradeConfig {
   // Match-Differ loss recovery
   mdRecoveryEnabled?: boolean;
   mdRecoveryLossTrigger?: number;
-  mdRecoveryMode?: 'differ_only' | 'both_legs';
+  mdRecoveryMode?: 'differ_only' | 'both_legs' | 'over_under';
   mdRecoveryMartingaleFactor?: number;
   mdRecoveryMaxRounds?: number;
   mdRecoveryTickWait?: number;
