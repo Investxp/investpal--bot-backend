@@ -246,6 +246,13 @@ server.listen(PORT, () => {
   console.log(`Supported platforms: deriv, polymarket, sx, investpal`);
   console.log(`WS endpoint: ws://localhost:${PORT}/ws`);
   console.log(`API: http://localhost:${PORT}/api/status`);
+  // Load persisted followers and reconnect
+  store.loadFollowers();
+  const fCount = store.getFollowers().length;
+  if (fCount > 0) {
+    console.log(`Loaded ${fCount} persisted follower(s), reconnecting...`);
+    copyPool.sync();
+  }
 });
 
 process.on('SIGTERM', async () => {

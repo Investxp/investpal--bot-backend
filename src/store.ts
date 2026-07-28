@@ -1,4 +1,6 @@
 import { v4 as uuid } from 'uuid';
+import fs from 'fs';
+import path from 'path';
 import type { TradeLog, TradeStats, RunnerState, TradeStatus, TradeConfig } from './types.js';
 
 type CopyType = 'demo_to_demo' | 'demo_to_live' | 'live_to_live' | 'live_to_demo';
@@ -114,6 +116,7 @@ export class Store {
       total_trades: 0, total_pnl: 0,
     };
     this.followers.set(id, follower);
+    this.saveFollowers();
     return id;
   }
 
@@ -127,11 +130,34 @@ export class Store {
 
   toggleFollower(id: number, active: boolean) {
     const f = this.followers.get(id);
-    if (f) { f.active = active ? 1 : 0; }
+    if (f) { f.active = active ? 1 : 0; this.saveFollowers(); }
   }
 
   deleteFollower(id: number) {
     this.followers.delete(id);
+    this.saveFollowers();
+  }
+
+  private readonly FOLLOWER_FILE = path.resolve('followers.json');
+
+  private saveFollowers() {
+    try {
+      const data = JSON.stringify(Array.from(this.followers.values()), null, 2);
+      fs.writeFileSync(this.FOLLOWER_FILE, data, 'utf-8');
+    } catch { /* silent */ }
+  }
+
+  loadFollowers() {
+    try {
+      if (fs.existsSync(this.FOLLOWER_FILE)) {
+        const raw = fs.readFileSync(this.FOLLOWER_FILE, 'utf-8');
+        const arr: CopyFollower[] = JSON.parse(raw);
+        for (const f of arr) {
+          this.followers.set(f.id, f);
+          if (f.id >= this.fIdCounter) this.fIdCounter = f.id + 1;
+        }
+      }
+    } catch { /* silent */ }
   }
 
   logCopyTrade(entry: Omit<CopyTradeLog, 'id'>): number {

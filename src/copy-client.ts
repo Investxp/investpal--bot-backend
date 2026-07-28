@@ -66,13 +66,26 @@ class CopyClient {
               if (!accounts.length) {
                 return reject(new Error(`No accounts found (HTTP ${res.statusCode})`));
               }
-              // Filter by preferred account type or fall back to demo-first
-              const filtered = preferredAccountType
-                ? accounts.filter((a: any) => a.account_type === preferredAccountType && a.status === 'active')
+              // Deriv API uses 'demo' for demo and 'real' for live; map 'live' → 'real'
+              const apiType = preferredAccountType === 'live' ? 'real' : preferredAccountType;
+              const filtered = apiType
+                ? accounts.filter((a: any) => a.account_type === apiType && a.status === 'active')
                 : accounts.filter((a: any) => a.status === 'active');
-              const demo = filtered.find((a: any) => a.account_type === 'demo');
-              const live = filtered.find((a: any) => a.account_type !== 'demo');
-              const chosen = demo || live || filtered[0] || accounts[0];
+              const chosen = filtered[0];
+              if (!chosen) {
+                // Fall back to any active account with correct prefix match (DOT=demo, ROT=real)
+                const prefixMatch = preferredAccountType === 'demo'
+                  ? accounts.find((a: any) => (a.account_id || '').startsWith('DOT') && a.status === 'active')
+                  : preferredAccountType === 'live'
+                    ? accounts.find((a: any) => (a.account_id || '').startsWith('ROT') && a.status === 'active')
+                    : accounts.find((a: any) => a.status === 'active');
+                if (!prefixMatch) return reject(new Error(`No ${preferredAccountType || 'active'} account found`));
+                this._accountId = prefixMatch.account_id;
+                this._currency = prefixMatch.currency || 'USD';
+                this._balance = parseFloat(prefixMatch.balance || '0');
+                store.addLog(`[CopyClient] Resolved account (prefix): ${prefixMatch.account_id} (${preferredAccountType}, ${prefixMatch.currency})`, 'info');
+                return resolve(prefixMatch.account_id);
+              }
               this._accountId = chosen.account_id;
               this._currency = chosen.currency || 'USD';
               this._balance = parseFloat(chosen.balance || '0');
