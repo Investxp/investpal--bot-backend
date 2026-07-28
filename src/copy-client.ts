@@ -3,8 +3,8 @@ import https from 'https';
 import { store } from './store.js';
 
 const OTP_API_BASE = 'https://api.derivws.com/trading/v1/options';
-// ONLY OAuth2 client_id — no legacy numeric app_id
-const OAUTH_CLIENT_ID = '019eb681-1505-7bc3-991a-65e6b76a60a4';
+// Deriv universal app ID — all OTP calls use this
+const OAUTH_CLIENT_ID = '33O6s5sRWxywmFZAGbjBf';
 
 type TokenType = 'pat' | 'oauth2';
 

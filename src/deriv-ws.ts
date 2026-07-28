@@ -26,7 +26,7 @@ export class DerivClient {
   private onStatusChange: ((connected: boolean, reason?: string) => void) | null = null;
 
   constructor(token: string) {
-    this.appId = '019eb681-1505-7bc3-991a-65e6b76a60a4';
+    this.appId = '33O6s5sRWxywmFZAGbjBf';
     this.token = token;
   }
 
