@@ -494,6 +494,25 @@ export class TradeEngine {
       store.leg1.activeContractId = null; store.leg2.activeContractId = null; store.leg3.activeContractId = null;
       store.leg1.isTrading = false; store.leg2.isTrading = false; store.leg3.isTrading = false;
 
+      // Track consecutive wins/losses for MD recovery
+      const winCount = (w1 ? 1 : 0) + (w2 ? 1 : 0) + (isTriple && w3 ? 1 : 0);
+      const lossCount = isTriple ? 3 - winCount : 2 - winCount;
+      if (lossCount > 0) {
+        this.consecutiveLosses++;
+        this.consecutiveWins = 0;
+      } else {
+        this.consecutiveWins++;
+        this.consecutiveLosses = 0;
+      }
+
+      // Check MD recovery activation
+      if (lossCount > 0 && cfg.mdRecoveryEnabled && !this.mdRecoveryActive) {
+        const trigger = cfg.mdRecoveryLossTrigger ?? 3;
+        if (this.consecutiveLosses >= trigger) {
+          this.activateMDRecovery(cfg, cfg.baseStake, store.leg1.label);
+        }
+      }
+
       // ── Recovery logic ─────────────────────────────────────────────
       const legMult = (leg: number): number => {
         if ((leg === 2 || leg === 3) && cfg.multiplierMode && cfg.multiplierMode !== 'fixed' && cfg.martingaleMultiplier2) return cfg.martingaleMultiplier2;
