@@ -61,6 +61,14 @@ export interface TradeConfig {
   multiplierMode?: 'fixed' | 'separate' | 'auto-max' | 'biased';
   martingaleMultiplier2?: number;
   biasedMultiplier?: number;
+  // Match-Differ loss recovery
+  mdRecoveryEnabled?: boolean;
+  mdRecoveryLossTrigger?: number;
+  mdRecoveryMode?: 'differ_only' | 'both_legs';
+  mdRecoveryMartingaleFactor?: number;
+  mdRecoveryMaxRounds?: number;
+  mdRecoveryTickWait?: number;
+  mdRecoveryAnalysisWindow?: number;
 }
 
 export interface RunnerState {

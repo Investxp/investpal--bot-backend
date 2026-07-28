@@ -35,6 +35,12 @@ export class TradeEngine {
   private consecutiveErrors = 0;
   private lastTradeTime = 0;
 
+  // Match-Differ recovery
+  private mdRecoveryActive = false;
+  private mdRoundsRemaining = 0;
+  private mdLossAccumulator = 0;
+  private mdHotDigit = 5;
+
   constructor(deriv: DerivClient) { this.deriv = deriv; }
 
   private async sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
@@ -123,6 +129,10 @@ export class TradeEngine {
     this.dynamicWinLimit = config.coolOffConsecutiveWins ?? 3;
     this.consecutiveErrors = 0;
     this.lastTradeTime = 0;
+    this.mdRecoveryActive = false;
+    this.mdRoundsRemaining = 0;
+    this.mdLossAccumulator = 0;
+    this.mdHotDigit = 5;
     this.lastTickDigit = await this.deriv.getLastDigit(config.symbol).catch(() => 5);
 
     store.reset(config);
@@ -211,6 +221,11 @@ export class TradeEngine {
   // ── Sequential Loop ────────────────────────────────────────────────
   private async loopSequential() {
     while (this.isRunning) {
+      if (this.mdRecoveryActive) {
+        await this.executeMDRecoveryRound();
+        if (!this.isRunning) break;
+        continue;
+      }
       await this.executeTrade(this.currentLeg);
       if (!this.isRunning) break;
       if (this.config.isAlternateMode) {
@@ -222,6 +237,10 @@ export class TradeEngine {
   // ── Hedge Loop ─────────────────────────────────────────────────────
   private async loopHedge() {
     while (this.isRunning) {
+      if (this.mdRecoveryActive) {
+        await this.executeMDRecoveryRound();
+        continue;
+      }
       await this.executeHedgeRound();
     }
   }
@@ -284,6 +303,14 @@ export class TradeEngine {
       // Track consecutive
       if (result.won) { this.consecutiveWins++; this.consecutiveLosses = 0; }
       else { this.consecutiveLosses++; this.consecutiveWins = 0; }
+
+      // Check MD recovery activation
+      if (!result.won && cfg.mdRecoveryEnabled && !this.mdRecoveryActive) {
+        const trigger = cfg.mdRecoveryLossTrigger ?? 3;
+        if (this.consecutiveLosses >= trigger) {
+          this.activateMDRecovery(cfg, stake, label);
+        }
+      }
 
       // Cool-off check
       if (cfg.enableCoolOff) {
@@ -635,6 +662,12 @@ export class TradeEngine {
   // ── Multiplier Loop ────────────────────────────────────────────────
   private async loopMultiplier() {
     while (this.isRunning) {
+      if (this.mdRecoveryActive) {
+        await this.executeMDRecoveryRound();
+        this.lastTradeTime = Date.now();
+        this.consecutiveErrors = 0;
+        continue;
+      }
       try {
         // Minimum 5s gap between trades to avoid rate limits
         const elapsed = Date.now() - this.lastTradeTime;
@@ -779,6 +812,12 @@ export class TradeEngine {
   // ── Multiplier Hedge Loop ─────────────────────────────────────────
   private async loopMultiplierHedge() {
     while (this.isRunning) {
+      if (this.mdRecoveryActive) {
+        await this.executeMDRecoveryRound();
+        this.lastTradeTime = Date.now();
+        this.consecutiveErrors = 0;
+        continue;
+      }
       try {
         const elapsed = Date.now() - this.lastTradeTime;
         if (elapsed < 5000) {
@@ -978,5 +1017,181 @@ export class TradeEngine {
   private randomizeCoolOff() {
     this.dynamicLossLimit = Math.max(1, (this.config.coolOffConsecutiveLosses ?? 3) + Math.floor(Math.random() * 3) - 1);
     this.dynamicWinLimit = Math.max(1, (this.config.coolOffConsecutiveWins ?? 3) + Math.floor(Math.random() * 3) - 1);
+  }
+
+  // ── Match-Differ Loss Recovery ─────────────────────────────────────
+  private activateMDRecovery(cfg: TradeConfig, lastStake: number, label: string) {
+    this.mdRecoveryActive = true;
+    const maxRounds = cfg.mdRecoveryMaxRounds ?? 3;
+    this.mdRoundsRemaining = maxRounds;
+    // Accumulate total loss from recovery debt + current streak loss estimate
+    this.mdLossAccumulator += Math.max(0, store.stats.totalProfit < 0 ? Math.abs(store.stats.totalProfit) : lastStake);
+    store.addLog(`[MD Recovery] Activated after ${this.consecutiveLosses} consecutive losses (max ${maxRounds} rounds)`, 'warn');
+    store.leg1.label = 'MD Differ'; store.leg1.contractType = 'DIGITDIFF';
+    store.broadcast();
+  }
+
+  private async lastDigitAnalysis(symbol: string, waitTicks: number, analysisWindow: number): Promise<number> {
+    // Wait N ticks before starting analysis
+    const digitHistory: number[] = [];
+    await new Promise<void>((resolve) => {
+      let waited = 0;
+      const unsub = this.deriv.subscribeTicks(symbol, (tick) => {
+        const s = tick.quote.toString();
+        const dot = s.indexOf('.');
+        const pip = dot === -1 ? 0 : s.length - dot - 1;
+        const d = pip > 0 ? parseInt(s.slice(-1), 10) : Math.floor(Math.abs(tick.quote) % 10);
+        if (isNaN(d)) return;
+        waited++;
+        if (waited <= waitTicks) return; // wait phase — skip
+        digitHistory.push(d);
+        if (digitHistory.length >= analysisWindow) {
+          unsub.then(fn => fn());
+          resolve();
+        }
+      }).catch(() => {});
+    });
+
+    if (digitHistory.length === 0) return this.lastTickDigit;
+
+    // Find hottest digit (most frequent)
+    const freq: Record<number, number> = {};
+    for (const d of digitHistory) freq[d] = (freq[d] || 0) + 1;
+    let hotDigit = 5;
+    let maxFreq = 0;
+    for (let d = 0; d <= 9; d++) {
+      if ((freq[d] || 0) > maxFreq) {
+        maxFreq = freq[d];
+        hotDigit = d;
+      }
+    }
+    store.addLog(`[MD Recovery] Digit analysis: ${digitHistory.join(',')} → hot=${hotDigit} (freq=${maxFreq}/${analysisWindow})`, 'info');
+    return hotDigit;
+  }
+
+  private async executeMDRecoveryRound() {
+    if (!this.isRunning || !this.mdRecoveryActive) return;
+    const cfg = this.config;
+    const mode = cfg.mdRecoveryMode ?? 'differ_only';
+    const factor = cfg.mdRecoveryMartingaleFactor ?? 2;
+    const waitTicks = cfg.mdRecoveryTickWait ?? 3;
+    const analysisWindow = cfg.mdRecoveryAnalysisWindow ?? 5;
+
+    // Calculate stake: total loss × martingale factor
+    const mdStake = Math.max(cfg.baseStake, Math.round((this.mdLossAccumulator * factor) * 100) / 100);
+
+    if (!this.checkLimits()) return;
+
+    try {
+      store.addLog(`[MD Recovery] Round ${(cfg.mdRecoveryMaxRounds ?? 3) - this.mdRoundsRemaining + 1}/${cfg.mdRecoveryMaxRounds ?? 3} — analyzing digits (wait ${waitTicks}+${analysisWindow} ticks)`, 'info');
+      store.leg1.isTrading = true;
+      store.leg1.currentStake = mdStake;
+      store.broadcast();
+
+      // Wait and analyze digits
+      this.mdHotDigit = await this.lastDigitAnalysis(cfg.symbol, waitTicks, analysisWindow);
+
+      if (mode === 'differ_only') {
+        // Place DIFFER on hot digit
+        const diffProposal = await this.deriv.placeProposal(
+          'DIGITDIFF', mdStake, cfg.symbol, 1, 't', this.mdHotDigit,
+        );
+        const contractId = await this.deriv.buyContract(diffProposal.id, diffProposal.askPrice);
+        store.leg1.activeContractId = contractId;
+        store.leg1.label = `MD Differ (hot=${this.mdHotDigit})`;
+        store.broadcast();
+
+        store.addLog(`[MD Recovery] Bought DIFFER (hot=${this.mdHotDigit}) at $${mdStake.toFixed(2)} — contract ${contractId}`, 'info');
+        this.replicateToFollowers('DIGITDIFF', mdStake, 1, 't', cfg.symbol, contractId, this.mdHotDigit).catch(() => {});
+
+        const result = await this.deriv.waitForResult(contractId);
+        this.resolveCopyOutcomes(contractId).catch(() => {});
+        store.leg1.activeContractId = null;
+
+        store.stats.totalTrades++;
+        store.stats.totalProfit += result.profit;
+        store.leg1.profit += result.profit;
+
+        if (result.won) {
+          store.addLog(`[MD Recovery] WIN $${result.profit.toFixed(2)} — streak broken, resuming normal mode`, 'success');
+          this.mdRecoveryActive = false;
+          this.consecutiveLosses = 0;
+          this.mdLossAccumulator = 0;
+          // Restore original contract type
+          const { leg1Type } = this.getLabels(cfg.mode);
+          store.leg1.contractType = leg1Type;
+          store.leg1.label = this.getLabels(cfg.mode).leg1Label;
+        } else {
+          this.mdLossAccumulator += Math.abs(result.profit);
+          this.mdRoundsRemaining--;
+          store.addLog(`[MD Recovery] LOSS $${result.profit.toFixed(2)} — ${this.mdRoundsRemaining} rounds remaining`, 'error');
+
+          if (this.mdRoundsRemaining <= 0) {
+            this.stop('[MD Recovery] Max rounds reached');
+            this.mdRecoveryActive = false;
+          }
+        }
+      } else {
+        // both_legs — place MATCH + DIFFER simultaneously
+        const [matchProp, diffProp] = await Promise.all([
+          this.deriv.placeProposal('DIGITMATCH', mdStake, cfg.symbol, 1, 't', this.mdHotDigit),
+          this.deriv.placeProposal('DIGITDIFF', mdStake, cfg.symbol, 1, 't', this.mdHotDigit),
+        ]);
+        const [matchId, diffId] = await Promise.all([
+          this.deriv.buyContract(matchProp.id, matchProp.askPrice),
+          this.deriv.buyContract(diffProp.id, diffProp.askPrice),
+        ]);
+        store.leg1.activeContractId = matchId;
+        store.leg2.activeContractId = diffId;
+        store.leg1.label = `MD Match (hot=${this.mdHotDigit})`;
+        store.leg2.label = `MD Differ (hot=${this.mdHotDigit})`;
+        store.broadcast();
+
+        this.replicateToFollowers('DIGITMATCH', mdStake, 1, 't', cfg.symbol, matchId, this.mdHotDigit).catch(() => {});
+        this.replicateToFollowers('DIGITDIFF', mdStake, 1, 't', cfg.symbol, diffId, this.mdHotDigit).catch(() => {});
+
+        const [matchResult, diffResult] = await Promise.all([
+          this.deriv.waitForResult(matchId),
+          this.deriv.waitForResult(diffId),
+        ]);
+        this.resolveCopyOutcomes(matchId).catch(() => {});
+        this.resolveCopyOutcomes(diffId).catch(() => {});
+
+        store.leg1.activeContractId = null;
+        store.leg2.activeContractId = null;
+        const roundNet = matchResult.profit + diffResult.profit;
+        store.stats.totalTrades += 2;
+        store.stats.totalProfit += roundNet;
+        store.leg1.profit += matchResult.profit;
+        store.leg2.profit += diffResult.profit;
+
+        if (matchResult.won || diffResult.won) {
+          store.addLog(`[MD Recovery] Round net: $${roundNet.toFixed(2)} (Match: ${matchResult.won ? 'W' : 'L'} / Differ: ${diffResult.won ? 'W' : 'L'}) — resuming`, 'success');
+          this.mdRecoveryActive = false;
+          this.consecutiveLosses = 0;
+          this.mdLossAccumulator = 0;
+          const labels = this.getLabels(cfg.mode);
+          store.leg1.contractType = labels.leg1Type; store.leg1.label = labels.leg1Label;
+          store.leg2.contractType = labels.leg2Type; store.leg2.label = labels.leg2Label;
+        } else {
+          this.mdLossAccumulator += Math.abs(roundNet);
+          this.mdRoundsRemaining--;
+          store.addLog(`[MD Recovery] Both lost — $${roundNet.toFixed(2)}, ${this.mdRoundsRemaining} rounds left`, 'error');
+          if (this.mdRoundsRemaining <= 0) {
+            this.stop('[MD Recovery] Max rounds reached');
+            this.mdRecoveryActive = false;
+          }
+        }
+      }
+
+      store.leg1.isTrading = false;
+      store.broadcast();
+    } catch (err: any) {
+      store.leg1.isTrading = false;
+      store.leg1.activeContractId = null;
+      store.addLog(`[MD Recovery] Error: ${err.message}`, 'error');
+      store.broadcast();
+      await this.sleep(2000);
+    }
   }
 }
