@@ -1,12 +1,16 @@
 import { v4 as uuid } from 'uuid';
 import type { TradeLog, TradeStats, RunnerState, TradeStatus, TradeConfig } from './types.js';
 
+type CopyType = 'demo_to_demo' | 'demo_to_live' | 'live_to_live' | 'live_to_demo';
+export type { CopyType };
+
 interface CopyFollower {
   id: number;
   name: string;
   token: string;
   connection_type: 'pat' | 'oauth2';
   oauth_account_id: string | null;
+  copy_type: CopyType;
   copy_ratio: number;
   max_stake: number;
   active: number;
@@ -100,12 +104,12 @@ export class Store {
   }
 
   // ── Copy Trading Follower methods ──
-  addFollower(name: string, token: string, connectionType: 'pat' | 'oauth2', copyRatio: number, maxStake: number, oauthAccountId?: string): number {
+  addFollower(name: string, token: string, connectionType: 'pat' | 'oauth2', copyType: CopyType, copyRatio: number, maxStake: number, oauthAccountId?: string): number {
     const id = this.fIdCounter++;
     const follower: CopyFollower = {
       id, name, token, connection_type: connectionType,
       oauth_account_id: oauthAccountId || null,
-      copy_ratio: copyRatio, max_stake: maxStake,
+      copy_type: copyType, copy_ratio: copyRatio, max_stake: maxStake,
       active: 1, created_at: new Date().toISOString(),
       total_trades: 0, total_pnl: 0,
     };

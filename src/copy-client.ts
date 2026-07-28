@@ -26,25 +26,26 @@ class CopyClient {
    * Connect via Deriv OTP API — works for both PAT and OAuth2 tokens.
    * The OTP endpoint accepts any valid Deriv token as Bearer token
    * and returns a temporary WebSocket URL (no authorize step needed).
+   * @param preferredAccountType 'demo' | 'live' — which account type to resolve (PAT flow only)
    */
-  async connect(token: string, tokenType: TokenType, targetAccountId?: string): Promise<void> {
-    const wsUrl = await this.callOtpApi(token, tokenType, targetAccountId);
+  async connect(token: string, tokenType: TokenType, targetAccountId?: string, preferredAccountType?: 'demo' | 'live'): Promise<void> {
+    const wsUrl = await this.callOtpApi(token, tokenType, targetAccountId, preferredAccountType);
     await this.connectTo(wsUrl);
     this._connected = true;
   }
 
-  private async callOtpApi(token: string, tokenType: TokenType, targetAccountId?: string): Promise<string> {
+  private async callOtpApi(token: string, tokenType: TokenType, targetAccountId?: string, preferredAccountType?: 'demo' | 'live'): Promise<string> {
     // Step 1: If no targetAccountId provided (PAT flow), resolve from accounts list
     let accountId = targetAccountId;
     if (!accountId) {
-      accountId = await this.resolveAccountId(token);
+      accountId = await this.resolveAccountId(token, preferredAccountType);
     }
 
     // Step 2: Get OTP session URL for the resolved account
     return this.otpSession(token, accountId);
   }
 
-  private resolveAccountId(token: string): Promise<string> {
+  private resolveAccountId(token: string, preferredAccountType?: 'demo' | 'live'): Promise<string> {
     return new Promise((resolve, reject) => {
       const req = https.get(
         {
@@ -65,10 +66,13 @@ class CopyClient {
               if (!accounts.length) {
                 return reject(new Error(`No accounts found (HTTP ${res.statusCode})`));
               }
-              // Prefer demo account (safer for testing)
-              const demo = accounts.find((a: any) => a.account_type === 'demo' && a.status === 'active');
-              const real = accounts.find((a: any) => a.account_type !== 'demo' && a.status === 'active');
-              const chosen = demo || real || accounts[0];
+              // Filter by preferred account type or fall back to demo-first
+              const filtered = preferredAccountType
+                ? accounts.filter((a: any) => a.account_type === preferredAccountType && a.status === 'active')
+                : accounts.filter((a: any) => a.status === 'active');
+              const demo = filtered.find((a: any) => a.account_type === 'demo');
+              const live = filtered.find((a: any) => a.account_type !== 'demo');
+              const chosen = demo || live || filtered[0] || accounts[0];
               this._accountId = chosen.account_id;
               this._currency = chosen.currency || 'USD';
               this._balance = parseFloat(chosen.balance || '0');
@@ -217,8 +221,12 @@ export class CopyTradingPool {
     for (const f of followers) {
       if (this.clients.has(f.id)) continue;
       const client = new CopyClient();
+      // Map copy_type to preferred account type
+      const preferredAccountType: 'demo' | 'live' | undefined =
+        f.copy_type === 'demo_to_demo' || f.copy_type === 'live_to_demo' ? 'demo' :
+        f.copy_type === 'demo_to_live' || f.copy_type === 'live_to_live' ? 'live' : undefined;
       const connectPromise = f.connection_type === 'pat'
-        ? client.connect(f.token, 'pat')
+        ? client.connect(f.token, 'pat', undefined, preferredAccountType)
         : client.connect(f.token, 'oauth2', f.oauth_account_id || undefined);
       connectPromise.then(() => {
         store.addLog(`[CopyPool] Connected follower: ${f.name} (${f.id})`, 'success');

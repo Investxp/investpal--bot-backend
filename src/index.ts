@@ -10,6 +10,7 @@ import { InvestPalEngine } from './investpal-engine.js';
 import { CopyTradingPool } from './copy-client.js';
 import { store } from './store.js';
 import type { TradeConfig, Platform } from './types.js';
+import type { CopyType } from './store.js';
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 
@@ -97,10 +98,11 @@ app.post('/api/stop', async (_req, res) => {
 
 // ── Copy Trading Bridge (Multi-Follower Pool) ──────────────────────
 app.post('/api/copy-followers', (req, res) => {
-  const { name, token, connectionType, copyRatio, maxStake, oauthAccountId } = req.body;
+  const { name, token, connectionType, copyType, copyRatio, maxStake, oauthAccountId } = req.body;
   if (!name || !token) return res.status(400).json({ error: 'Name and token are required' });
   const connType: 'pat' | 'oauth2' = connectionType || 'pat';
-  const fid = store.addFollower(name, token, connType, copyRatio || 1.0, maxStake || 100.0, oauthAccountId);
+  const ct: CopyType = copyType || 'live_to_live';
+  const fid = store.addFollower(name, token, connType, ct, copyRatio || 1.0, maxStake || 100.0, oauthAccountId);
   copyPool.sync();
   store.addLog(`[CopyPool] Added follower: ${name} (ID: ${fid})`, 'success');
   res.json({ status: 'SUCCESS', id: fid });
@@ -110,7 +112,7 @@ app.get('/api/copy-followers', (_req, res) => {
   const followers = store.getFollowers().map(f => ({
     id: f.id, name: f.name, connection_type: f.connection_type,
     token_masked: f.token.length > 10 ? f.token.slice(0, 6) + '...' + f.token.slice(-4) : '...',
-    copy_ratio: f.copy_ratio, max_stake: f.max_stake,
+    copy_type: f.copy_type, copy_ratio: f.copy_ratio, max_stake: f.max_stake,
     active: f.active, created_at: f.created_at,
     total_trades: f.total_trades, total_pnl: f.total_pnl,
   }));
@@ -168,14 +170,15 @@ app.post('/api/copy-resolve', async (req, res) => {
 
 // Legacy single copy endpoints (backward-compatible)
 app.post('/api/copy-init', async (req, res) => {
-  const { apiToken, oauthToken, accountId } = req.body;
+  const { apiToken, oauthToken, accountId, copyType } = req.body;
   if (!apiToken && (!oauthToken || !accountId)) {
     return res.status(400).json({ error: 'Provide either apiToken or oauthToken + accountId' });
   }
   const name = apiToken ? apiToken.slice(0, 8) : (accountId || 'copy');
   const connType: 'pat' | 'oauth2' = apiToken ? 'pat' : 'oauth2';
   const token = apiToken || oauthToken!;
-  const fid = store.addFollower(name, token, connType, 1.0, 100.0, connType === 'oauth2' ? accountId : undefined);
+  const ct: CopyType = copyType || 'live_to_live';
+  const fid = store.addFollower(name, token, connType, ct, 1.0, 100.0, connType === 'oauth2' ? accountId : undefined);
   copyPool.sync();
   const client = copyPool.getClient(fid);
   const account = client?.accountId || null;
