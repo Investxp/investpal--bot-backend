@@ -1072,7 +1072,7 @@ export class TradeEngine {
   private async executeMDRecoveryRound() {
     if (!this.isRunning || !this.mdRecoveryActive) return;
     const cfg = this.config;
-    const mode = cfg.mdRecoveryMode ?? 'over_under';
+    const mode = cfg.mdRecoveryMode ?? 'differ_only';
     const factor = cfg.mdRecoveryMartingaleFactor ?? 2;
     const waitTicks = cfg.mdRecoveryTickWait ?? 1;
     const analysisWindow = cfg.mdRecoveryAnalysisWindow ?? 1;
@@ -1125,8 +1125,13 @@ export class TradeEngine {
           this.mdRoundsRemaining--;
           store.addLog(`[MD Recovery] LOSS $${result.profit.toFixed(2)} — ${this.mdRoundsRemaining} rounds remaining`, 'error');
           if (this.mdRoundsRemaining <= 0) {
-            this.stop('[MD Recovery] Max rounds reached');
+            store.addLog('[MD Recovery] Max rounds reached — resuming normal trading', 'warn');
             this.mdRecoveryActive = false;
+            this.consecutiveLosses = 0;
+            this.mdLossAccumulator = 0;
+            const labels = this.getLabels(cfg.mode);
+            store.leg1.contractType = labels.leg1Type; store.leg1.label = labels.leg1Label;
+            store.leg2.contractType = labels.leg2Type; store.leg2.label = labels.leg2Label;
           }
         }
       } else if (mode === 'over_under') {
@@ -1176,8 +1181,13 @@ export class TradeEngine {
           this.mdRoundsRemaining--;
           store.addLog(`[MD Recovery] Both lost (digit=5!) — $${roundNet.toFixed(2)}, ${this.mdRoundsRemaining} rounds left`, 'error');
           if (this.mdRoundsRemaining <= 0) {
-            this.stop('[MD Recovery] Max rounds reached');
+            store.addLog('[MD Recovery] Max rounds reached — resuming normal trading', 'warn');
             this.mdRecoveryActive = false;
+            this.consecutiveLosses = 0;
+            this.mdLossAccumulator = 0;
+            const labels = this.getLabels(cfg.mode);
+            store.leg1.contractType = labels.leg1Type; store.leg1.label = labels.leg1Label;
+            store.leg2.contractType = labels.leg2Type; store.leg2.label = labels.leg2Label;
           }
         }
       } else {
@@ -1186,8 +1196,13 @@ export class TradeEngine {
           store.addLog(`[MD Recovery] LOSS $${result.profit.toFixed(2)} — ${this.mdRoundsRemaining} rounds remaining`, 'error');
 
           if (this.mdRoundsRemaining <= 0) {
-            this.stop('[MD Recovery] Max rounds reached');
+            store.addLog('[MD Recovery] Max rounds reached — resuming normal trading', 'warn');
             this.mdRecoveryActive = false;
+            this.consecutiveLosses = 0;
+            this.mdLossAccumulator = 0;
+            const labels = this.getLabels(cfg.mode);
+            store.leg1.contractType = labels.leg1Type; store.leg1.label = labels.leg1Label;
+            store.leg2.contractType = labels.leg2Type; store.leg2.label = labels.leg2Label;
           }
         }
       } else {
@@ -1237,8 +1252,13 @@ export class TradeEngine {
           this.mdRoundsRemaining--;
           store.addLog(`[MD Recovery] Both lost — $${roundNet.toFixed(2)}, ${this.mdRoundsRemaining} rounds left`, 'error');
           if (this.mdRoundsRemaining <= 0) {
-            this.stop('[MD Recovery] Max rounds reached');
+            store.addLog('[MD Recovery] Max rounds reached — resuming normal trading', 'warn');
             this.mdRecoveryActive = false;
+            this.consecutiveLosses = 0;
+            this.mdLossAccumulator = 0;
+            const labels = this.getLabels(cfg.mode);
+            store.leg1.contractType = labels.leg1Type; store.leg1.label = labels.leg1Label;
+            store.leg2.contractType = labels.leg2Type; store.leg2.label = labels.leg2Label;
           }
         }
       }
