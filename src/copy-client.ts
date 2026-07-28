@@ -3,8 +3,10 @@ import https from 'https';
 import { store } from './store.js';
 
 const OTP_API_BASE = 'https://api.derivws.com/trading/v1/options';
-const WS_LEGACY_APP_ID = process.env.COPY_APP_ID || '1089';
-const OAUTH_CLIENT_ID = process.env.DERIV_OAUTH_CLIENT_ID || process.env.DERIV_APP_ID || '019eb681-1505-7bc3-991a-65e6b76a60a4';
+// ONLY OAuth2 client_id — no legacy numeric app_id
+const OAUTH_CLIENT_ID = '019eb681-1505-7bc3-991a-65e6b76a60a4';
+
+type TokenType = 'pat' | 'oauth2';
 
 class CopyClient {
   private ws: WebSocket | null = null;
@@ -20,59 +22,106 @@ class CopyClient {
   get balance() { return this._balance; }
   get currency() { return this._currency; }
 
-  async connect(opts: { oauthToken?: string; accountId?: string; apiToken?: string }): Promise<void> {
-    const { oauthToken, accountId, apiToken } = opts;
-    if (apiToken) return this.connectLegacy(apiToken);
-    if (!oauthToken || !accountId) throw new Error('Provide either apiToken or oauthToken + accountId');
-    const wsUrl = await this.callOtpApi(oauthToken, accountId);
+  /**
+   * Connect via Deriv OTP API — works for both PAT and OAuth2 tokens.
+   * The OTP endpoint accepts any valid Deriv token as Bearer token
+   * and returns a temporary WebSocket URL (no authorize step needed).
+   */
+  async connect(token: string, tokenType: TokenType, targetAccountId?: string): Promise<void> {
+    const wsUrl = await this.callOtpApi(token, tokenType, targetAccountId);
     await this.connectTo(wsUrl);
     this._connected = true;
   }
 
-  private async callOtpApi(oauthToken: string, accountId: string): Promise<string> {
+  private async callOtpApi(token: string, tokenType: TokenType, targetAccountId?: string): Promise<string> {
+    // Step 1: If no targetAccountId provided (PAT flow), resolve from accounts list
+    let accountId = targetAccountId;
+    if (!accountId) {
+      accountId = await this.resolveAccountId(token);
+    }
+
+    // Step 2: Get OTP session URL for the resolved account
+    return this.otpSession(token, accountId);
+  }
+
+  private resolveAccountId(token: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const req = https.get(
+        {
+          hostname: 'api.derivws.com',
+          path: '/trading/v1/options/accounts',
+          headers: {
+            'Deriv-App-ID': OAUTH_CLIENT_ID,
+            'Authorization': `Bearer ${token}`,
+          },
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => (body += chunk));
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(body);
+              const accounts = json.data || [];
+              if (!accounts.length) {
+                return reject(new Error(`No accounts found (HTTP ${res.statusCode})`));
+              }
+              // Prefer demo account (safer for testing)
+              const demo = accounts.find((a: any) => a.account_type === 'demo' && a.status === 'active');
+              const real = accounts.find((a: any) => a.account_type !== 'demo' && a.status === 'active');
+              const chosen = demo || real || accounts[0];
+              this._accountId = chosen.account_id;
+              this._currency = chosen.currency || 'USD';
+              this._balance = parseFloat(chosen.balance || '0');
+              store.addLog(`[CopyClient] Resolved account: ${chosen.account_id} (${chosen.account_type}, ${chosen.currency})`, 'info');
+              resolve(chosen.account_id);
+            } catch {
+              reject(new Error(`Invalid accounts response (HTTP ${res.statusCode}): ${body.slice(0, 200)}`));
+            }
+          });
+        },
+      );
+      req.on('error', reject);
+    });
+  }
+
+  private otpSession(token: string, accountId: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const url = new URL(`${OTP_API_BASE}/accounts/${accountId}/otp`);
       const postData = '';
-      const req = https.request({
-        hostname: url.hostname, path: url.pathname, method: 'POST',
-        headers: { 'Deriv-App-ID': OAUTH_CLIENT_ID, 'Authorization': `Bearer ${oauthToken}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
-      }, (res) => {
-        let body = '';
-        res.on('data', (chunk) => (body += chunk));
-        res.on('end', () => {
-          try {
-            const json = JSON.parse(body);
-            if (json.data?.url) { this._accountId = accountId; resolve(json.data.url); }
-            else reject(new Error(json.errors?.[0]?.message || `No OTP URL (HTTP ${res.statusCode}). Response: ${body.slice(0, 200)}`));
-          } catch {
-            reject(new Error(`Invalid OTP API response (HTTP ${res.statusCode}): ${body.slice(0, 200)}`));
-          }
-        });
-      });
+      const req = https.request(
+        {
+          hostname: url.hostname,
+          path: url.pathname,
+          method: 'POST',
+          headers: {
+            'Deriv-App-ID': OAUTH_CLIENT_ID,
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData),
+          },
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => (body += chunk));
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(body);
+              if (json.data?.url) {
+                this._accountId = accountId;
+                resolve(json.data.url);
+              } else {
+                reject(new Error(json.errors?.[0]?.message || `No OTP URL (HTTP ${res.statusCode}): ${body.slice(0, 200)}`));
+              }
+            } catch {
+              reject(new Error(`Invalid OTP response (HTTP ${res.statusCode}): ${body.slice(0, 200)}`));
+            }
+          });
+        },
+      );
       req.on('error', reject);
       req.write(postData);
       req.end();
     });
-  }
-
-  private async connectLegacy(apiToken: string): Promise<void> {
-    const endpoints = [
-      `wss://ws.derivws.com/websockets/v3?app_id=${WS_LEGACY_APP_ID}&l=EN&brand=deriv`,
-      `wss://ws.binaryws.com/websockets/v3?app_id=${WS_LEGACY_APP_ID}&l=EN&brand=deriv`,
-    ];
-    let lastErr: Error | null = null;
-    for (const url of endpoints) {
-      try { await this.connectTo(url); lastErr = null; break; }
-      catch (err) { lastErr = err instanceof Error ? err : new Error(String(err)); }
-    }
-    if (lastErr) throw lastErr;
-    const authResp = await this.send({ authorize: apiToken });
-    if (authResp.error) throw new Error(authResp.error.message || 'Authorization failed');
-    this._accountId = authResp.authorize?.loginid || null;
-    this._currency = authResp.authorize?.currency || 'USD';
-    const balResp = await this.send({ balance: 1 });
-    this._balance = balResp.balance?.balance ?? null;
-    this._connected = true;
   }
 
   private connectTo(url: string): Promise<void> {
@@ -168,14 +217,10 @@ export class CopyTradingPool {
     for (const f of followers) {
       if (this.clients.has(f.id)) continue;
       const client = new CopyClient();
-      const opts: { apiToken?: string; oauthToken?: string; accountId?: string } = {};
-      if (f.connection_type === 'pat') {
-        opts.apiToken = f.token;
-      } else {
-        opts.oauthToken = f.token;
-        opts.accountId = f.oauth_account_id || undefined;
-      }
-      client.connect(opts).then(() => {
+      const connectPromise = f.connection_type === 'pat'
+        ? client.connect(f.token, 'pat')
+        : client.connect(f.token, 'oauth2', f.oauth_account_id || undefined);
+      connectPromise.then(() => {
         store.addLog(`[CopyPool] Connected follower: ${f.name} (${f.id})`, 'success');
       }).catch((err) => {
         store.addLog(`[CopyPool] Failed to connect follower ${f.name}: ${err.message}`, 'error');

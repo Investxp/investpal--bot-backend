@@ -16,9 +16,7 @@ const PORT = parseInt(process.env.PORT || '4000', 10);
 function createEngine(platform: Platform) {
   switch (platform) {
     case 'deriv': {
-      const appId = process.env.DERIV_OAUTH_CLIENT_ID || process.env.DERIV_APP_ID || '';
-      if (!appId) throw new Error('Missing DERIV_APP_ID or DERIV_OAUTH_CLIENT_ID');
-      return new DerivEngine(new DerivClient(appId, ''));
+      return new DerivEngine(new DerivClient(''));
     }
     case 'polymarket': return new PolymarketEngine();
     case 'sx': return new SXEngine();
@@ -56,9 +54,7 @@ app.post('/api/initialize-connection', async (req, res) => {
   const { oauthToken, accountId } = req.body;
   if (!oauthToken || !accountId) return res.status(400).json({ error: 'oauthToken and accountId required' });
   try {
-    const appId = process.env.DERIV_OAUTH_CLIENT_ID || process.env.DERIV_APP_ID || '';
-    if (!appId) return res.status(500).json({ error: 'DERIV_APP_ID or DERIV_OAUTH_CLIENT_ID not configured' });
-    derivClient = new DerivClient(appId, '');
+    derivClient = new DerivClient('');
     derivClient.setStatusHandler((connected, reason) => {
       if (connected) store.addLog('[Connection] Deriv OTP WebSocket reconnected', 'success');
       else if (reason) store.addLog(`[Connection] Deriv OTP WebSocket disconnected: ${reason}`, 'warn');
@@ -217,8 +213,6 @@ app.post('/api/copy-disconnect', (_req, res) => {
 });
 
 app.get('/api/check-token', async (_req, res) => {
-  const appId = process.env.DERIV_OAUTH_CLIENT_ID || process.env.DERIV_APP_ID || '';
-  if (!appId) return res.json({ valid: false, error: 'DERIV_APP_ID not configured' });
   const connected = derivClient?.connected ?? false;
   const hasOtp = derivClient?.hasOtpUrl ?? false;
   res.json({ valid: connected && hasOtp, connected, hasOtpUrl: hasOtp, accountId: derivClient?.accountId });

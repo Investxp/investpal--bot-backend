@@ -25,8 +25,8 @@ export class DerivClient {
   private tickSubscriptions: Map<string, Set<(tick: { quote: number; epoch: number }) => void>> = new Map();
   private onStatusChange: ((connected: boolean, reason?: string) => void) | null = null;
 
-  constructor(appId: string, token: string) {
-    this.appId = appId || process.env.DERIV_OAUTH_CLIENT_ID || process.env.DERIV_APP_ID || '019eb681-1505-7bc3-991a-65e6b76a60a4';
+  constructor(token: string) {
+    this.appId = '019eb681-1505-7bc3-991a-65e6b76a60a4';
     this.token = token;
   }
 
