@@ -1034,9 +1034,9 @@ export class TradeEngine {
   private async lastDigitAnalysis(symbol: string, waitTicks: number, analysisWindow: number): Promise<number> {
     // Wait N ticks before starting analysis
     const digitHistory: number[] = [];
-    await new Promise<void>((resolve) => {
+    await new Promise<void>(async (resolve) => {
       let waited = 0;
-      const unsub = this.deriv.subscribeTicks(symbol, (tick) => {
+      const unsub = await this.deriv.subscribeTicks(symbol, (tick) => {
         const s = tick.quote.toString();
         const dot = s.indexOf('.');
         const pip = dot === -1 ? 0 : s.length - dot - 1;
@@ -1046,10 +1046,10 @@ export class TradeEngine {
         if (waited <= waitTicks) return; // wait phase — skip
         digitHistory.push(d);
         if (digitHistory.length >= analysisWindow) {
-          unsub.then(fn => fn());
+          unsub();
           resolve();
         }
-      }).catch(() => {});
+      });
     });
 
     if (digitHistory.length === 0) return this.lastTickDigit;
@@ -1180,21 +1180,6 @@ export class TradeEngine {
           this.mdLossAccumulator += Math.abs(roundNet);
           this.mdRoundsRemaining--;
           store.addLog(`[MD Recovery] Both lost (digit=5!) — $${roundNet.toFixed(2)}, ${this.mdRoundsRemaining} rounds left`, 'error');
-          if (this.mdRoundsRemaining <= 0) {
-            store.addLog('[MD Recovery] Max rounds reached — resuming normal trading', 'warn');
-            this.mdRecoveryActive = false;
-            this.consecutiveLosses = 0;
-            this.mdLossAccumulator = 0;
-            const labels = this.getLabels(cfg.mode);
-            store.leg1.contractType = labels.leg1Type; store.leg1.label = labels.leg1Label;
-            store.leg2.contractType = labels.leg2Type; store.leg2.label = labels.leg2Label;
-          }
-        }
-      } else {
-          this.mdLossAccumulator += Math.abs(result.profit);
-          this.mdRoundsRemaining--;
-          store.addLog(`[MD Recovery] LOSS $${result.profit.toFixed(2)} — ${this.mdRoundsRemaining} rounds remaining`, 'error');
-
           if (this.mdRoundsRemaining <= 0) {
             store.addLog('[MD Recovery] Max rounds reached — resuming normal trading', 'warn');
             this.mdRecoveryActive = false;
