@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket as WsSocket } from 'ws';
 import { DerivClient } from './deriv-ws.js';
@@ -29,6 +30,7 @@ function createEngine(platform: Platform) {
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use('/bot', express.static(path.join(process.cwd(), 'public', 'bot')));
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
