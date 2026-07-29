@@ -10,8 +10,12 @@ import { SXEngine } from './sx-engine.js';
 import { InvestPalEngine } from './investpal-engine.js';
 import { CopyTradingPool } from './copy-client.js';
 import { store } from './store.js';
+import { StrategyRotatorAgent } from './agents/strategy-rotator.js';
+import { LLMAgent } from './agents/llm-agent.js';
+import { HybridAgent } from './agents/hybrid-agent.js';
 import type { TradeConfig, Platform } from './types.js';
 import type { CopyType } from './store.js';
+import type { AgentConfig, AgentEngine } from './agent-engine.js';
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 
@@ -229,6 +233,45 @@ app.get('/', (_req, res) => {
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', running: store.isRunning, platform: enginePlatform, connected: engine ? (engine as any).deriv?.connected ?? null : null });
+});
+
+// ── Autonomous Trading Agent Routes ──
+let currentAgent: AgentEngine | null = null;
+
+app.post('/api/agent/start', async (req, res) => {
+  if (currentAgent?.isRunning) return res.status(400).json({ error: 'Agent already running' });
+  const agentConfig: AgentConfig = req.body;
+  if (!agentConfig.agentType || !agentConfig.profitTarget) {
+    return res.status(400).json({ error: 'agentType and profitTarget required' });
+  }
+  if (!derivClient || !derivClient.hasOtpUrl) {
+    return res.status(400).json({ error: 'Deriv connection not initialized' });
+  }
+  try {
+    switch (agentConfig.agentType) {
+      case 'strategy-rotator': currentAgent = new StrategyRotatorAgent(); break;
+      case 'llm-agent': currentAgent = new LLMAgent(); break;
+      case 'hybrid-agent': currentAgent = new HybridAgent(); break;
+      default: return res.status(400).json({ error: `Unknown agent type: ${agentConfig.agentType}` });
+    }
+    currentAgent.start(agentConfig, derivClient).catch((err: Error) => {
+      store.addLog(`[Agent] Error: ${err.message}`, 'error');
+    });
+    res.json({ ok: true, agentType: agentConfig.agentType });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/agent/stop', async (_req, res) => {
+  if (currentAgent) await currentAgent.stop('User requested stop');
+  currentAgent = null;
+  res.json({ ok: true });
+});
+
+app.get('/api/agent/status', (_req, res) => {
+  if (!currentAgent) return res.json({ isRunning: false, agentType: null });
+  res.json(currentAgent.getStatus());
 });
 
 // ── WebSocket for real-time updates ──
