@@ -1,6 +1,7 @@
 import { v4 as uuid } from 'uuid';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import type { TradeLog, TradeStats, RunnerState, TradeStatus, TradeConfig } from './types.js';
 
 type CopyType = 'demo_to_demo' | 'demo_to_live' | 'live_to_live' | 'live_to_demo';
@@ -133,6 +134,14 @@ export class Store {
     if (f) { f.active = active ? 1 : 0; this.saveFollowers(); }
   }
 
+  updateFollower(id: number, patch: Partial<Pick<CopyFollower, 'copy_type' | 'copy_ratio' | 'max_stake' | 'active'>>) {
+    const f = this.followers.get(id);
+    if (!f) return false;
+    Object.assign(f, patch);
+    this.saveFollowers();
+    return true;
+  }
+
   deleteFollower(id: number) {
     this.followers.delete(id);
     this.saveFollowers();
@@ -140,22 +149,79 @@ export class Store {
 
   private readonly FOLLOWER_FILE = path.resolve('followers.json');
 
+  /**
+   * Credential encryption (AES-256-GCM).
+   * Secret comes from STORE_SECRET (fallback: API_AUTH_TOKEN).
+   * Without a secret, follower credentials are NEVER written to disk —
+   * they stay in memory only. This prevents Deriv API tokens / OAuth
+   * tokens from sitting in plaintext on disk.
+   */
+  private getSecret(): string {
+    return process.env.STORE_SECRET || process.env.API_AUTH_TOKEN || '';
+  }
+
+  private encryptText(plain: string): string | null {
+    const secret = this.getSecret();
+    if (!secret) return null;
+    const key = crypto.createHash('sha256').update(secret).digest();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const enc = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `enc:v1:${iv.toString('base64')}:${tag.toString('base64')}:${enc.toString('base64')}`;
+  }
+
+  private decryptText(payload: string): string | null {
+    const secret = this.getSecret();
+    if (!secret) return null;
+    try {
+      const parts = payload.split(':');
+      if (parts[0] !== 'enc' || parts[1] !== 'v1') return null;
+      const key = crypto.createHash('sha256').update(secret).digest();
+      const iv = Buffer.from(parts[2], 'base64');
+      const tag = Buffer.from(parts[3], 'base64');
+      const data = Buffer.from(parts[4], 'base64');
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+      decipher.setAuthTag(tag);
+      return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+    } catch {
+      return null;
+    }
+  }
+
   private saveFollowers() {
     try {
       const data = JSON.stringify(Array.from(this.followers.values()), null, 2);
-      fs.writeFileSync(this.FOLLOWER_FILE, data, 'utf-8');
+      const encrypted = this.encryptText(data);
+      if (!encrypted) {
+        this.addLog('[Security] STORE_SECRET not set — follower credentials kept in memory only, NOT persisted to disk', 'warn');
+        return;
+      }
+      fs.writeFileSync(this.FOLLOWER_FILE, encrypted, 'utf-8');
     } catch { /* silent */ }
   }
 
   loadFollowers() {
     try {
-      if (fs.existsSync(this.FOLLOWER_FILE)) {
-        const raw = fs.readFileSync(this.FOLLOWER_FILE, 'utf-8');
-        const arr: CopyFollower[] = JSON.parse(raw);
-        for (const f of arr) {
-          this.followers.set(f.id, f);
-          if (f.id >= this.fIdCounter) this.fIdCounter = f.id + 1;
-        }
+      if (!fs.existsSync(this.FOLLOWER_FILE)) return;
+      const raw = fs.readFileSync(this.FOLLOWER_FILE, 'utf-8');
+
+      let json = raw;
+      const decrypted = this.decryptText(raw);
+      if (decrypted) {
+        json = decrypted;
+      } else if (raw.trimStart().startsWith('{') || raw.trimStart().startsWith('[')) {
+        // Legacy plaintext file — migrate in-place on next save
+        this.addLog('[Security] followers.json contains PLAINTEXT credentials — re-encrypting on next follower change (set STORE_SECRET)', 'warn');
+      } else {
+        this.addLog('[Security] followers.json could not be decrypted (wrong STORE_SECRET?) — ignoring file', 'error');
+        return;
+      }
+
+      const arr: CopyFollower[] = JSON.parse(json);
+      for (const f of arr) {
+        this.followers.set(f.id, f);
+        if (f.id >= this.fIdCounter) this.fIdCounter = f.id + 1;
       }
     } catch { /* silent */ }
   }
