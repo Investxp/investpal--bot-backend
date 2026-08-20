@@ -66,7 +66,27 @@ export class TradeEngine {
     return 'martingale';
   }
 
+  /**
+   * Hard safety cap for every stake that goes to the market.
+   * Never risk more than maxStake (if configured) or 25x base stake,
+   * regardless of recovery method / martingale doubling.
+   */
+  private clampStake(stake: number): number {
+    const base = this.config?.baseStake || 1;
+    const explicitCap = this.config?.maxStake && this.config.maxStake > 0 ? this.config.maxStake : Infinity;
+    const safetyCap = Math.min(explicitCap, base * 25);
+    if (stake > safetyCap) {
+      store.addLog(`[Safety] Stake $${stake.toFixed(2)} clamped to hard cap $${safetyCap.toFixed(2)}`, 'warn');
+      return Math.round(safetyCap * 100) / 100;
+    }
+    return Math.round(stake * 100) / 100;
+  }
+
   private calcStake(method: string, won: boolean, loss: number, base: number, mult: number, leg: number = 1): number {
+    return this.clampStake(this.calcStakeRaw(method, won, loss, base, mult, leg));
+  }
+
+  private calcStakeRaw(method: string, won: boolean, loss: number, base: number, mult: number, leg: number = 1): number {
     if (!method || method === 'none') {
       return base;
     }
@@ -210,9 +230,9 @@ export class TradeEngine {
       'stays-between-goes-outside': ['Stays Between', 'RANGE', 'Goes Outside', 'UPORDOWN'],
       'stays-between-only': ['Stays Between', 'RANGE', 'Stays Between', 'RANGE'],
       'goes-outside-only': ['Goes Outside', 'UPORDOWN', 'Goes Outside', 'UPORDOWN'],
-      'only-ups-only-downs': ['Only Ups', 'ONLYUP', 'Only Downs', 'ONLYDOWN'],
-      'only-ups-only': ['Only Ups', 'ONLYUP', 'Only Ups', 'ONLYUP'],
-      'only-downs-only': ['Only Downs', 'ONLYDOWN', 'Only Downs', 'ONLYDOWN'],
+      'only-ups-only-downs': ['Only Ups', 'RUNHIGH', 'Only Downs', 'RUNLOW'],
+      'only-ups-only': ['Only Ups', 'RUNHIGH', 'Only Ups', 'RUNHIGH'],
+      'only-downs-only': ['Only Downs', 'RUNLOW', 'Only Downs', 'RUNLOW'],
     };
     const m = map[mode] ?? ['Leg 1', 'CALL', 'Leg 2', 'PUT'];
     return { leg1Label: m[0], leg1Type: m[1], leg2Label: m[2], leg2Type: m[3] };
