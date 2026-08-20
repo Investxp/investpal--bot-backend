@@ -179,7 +179,7 @@ class CopyClient {
     });
   }
 
-  async getProposal(type: string, stake: number, dur: number, durUnit: string, symbol: string, currency: string, barrierDigit?: number): Promise<{ id: string; askPrice: number }> {
+  async getProposal(type: string, stake: number, dur: number, durUnit: string, symbol: string, currency: string, barrierDigit?: number, barrierOffset?: string): Promise<{ id: string; askPrice: number }> {
     const payload: Record<string, unknown> = {
       proposal: 1, amount: stake, basis: 'stake',
       contract_type: type, currency,
@@ -187,6 +187,29 @@ class CopyClient {
       underlying_symbol: symbol,
     };
     if (['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER'].includes(type)) payload.barrier = String(barrierDigit ?? 5);
+    // Single-barrier contracts REQUIRE a barrier even when the master omitted one.
+    const isSingleBarrier = ['HIGHER', 'LOWER', 'ONETOUCH', 'NOTOUCH', 'TURBOSLONG', 'TURBOSSHORT'].includes(type);
+    if (isSingleBarrier) {
+      const raw = barrierOffset || '0.00';
+      const pos = raw.startsWith('+') || !raw.startsWith('-');
+      if (['HIGHER', 'ONETOUCH', 'TURBOSLONG'].includes(type)) {
+        payload.barrier = pos ? ('+' + raw.replace(/^\+/, '')) : raw;
+      } else {
+        payload.barrier = pos ? ('-' + raw.replace(/^\+/, '')) : raw;
+      }
+    } else if (['EXPIRYRANGE', 'EXPIRYMISS', 'RANGE', 'UPORDOWN'].includes(type)) {
+      const raw = barrierOffset || '0.00';
+      const isPos = raw.startsWith('+') && !raw.startsWith('-');
+      const isNeg = raw.startsWith('-');
+      const numVal = parseFloat(raw.replace(/[+\-]/, ''));
+      if (!isNaN(numVal) && numVal > 0) {
+        payload.barrier = isNeg ? ('-' + numVal.toFixed(2)) : '+0.00';
+        payload.barrier2 = isPos ? ('+' + numVal.toFixed(2)) : '+0.00';
+      } else {
+        payload.barrier = '+0.00';
+        payload.barrier2 = '+0.01';
+      }
+    }
     const resp = await this.send(payload);
     if (resp.error) throw new Error(resp.error.message);
     const propId = resp.proposal?.id;
@@ -195,8 +218,8 @@ class CopyClient {
     return { id: propId, askPrice };
   }
 
-  async executeTrade(type: string, stake: number, dur: number, durUnit: string, symbol: string, currency: string, barrierDigit?: number): Promise<{ contractId: number; buyPrice: number }> {
-    const { id, askPrice } = await this.getProposal(type, stake, dur, durUnit, symbol, currency, barrierDigit);
+  async executeTrade(type: string, stake: number, dur: number, durUnit: string, symbol: string, currency: string, barrierDigit?: number, barrierOffset?: string): Promise<{ contractId: number; buyPrice: number }> {
+    const { id, askPrice } = await this.getProposal(type, stake, dur, durUnit, symbol, currency, barrierDigit, barrierOffset);
     const buyResp = await this.send({ buy: id, price: askPrice });
     if (buyResp.error) throw new Error(buyResp.error.message);
     return { contractId: buyResp.buy?.contract_id, buyPrice: buyResp.buy?.buy_price || askPrice };
@@ -263,6 +286,7 @@ export class CopyTradingPool {
     durUnit: string,
     symbol: string,
     barrierDigit?: number,
+    barrierOffset?: string,
   ) {
     const followers = store.getFollowers().filter(f => f.active === 1);
     this.sync();
@@ -284,7 +308,7 @@ export class CopyTradingPool {
       const currency = client.currency || 'USD';
 
       try {
-        const result = await client.executeTrade(type, fStake, dur, durUnit, symbol, currency, barrierDigit);
+        const result = await client.executeTrade(type, fStake, dur, durUnit, symbol, currency, barrierDigit, barrierOffset);
         store.logCopyTrade({
           timestamp: new Date().toISOString(), master_signal_id: masterSignalId,
           master_contract_id: masterContractId, follower_id: f.id,

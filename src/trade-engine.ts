@@ -46,9 +46,9 @@ export class TradeEngine {
   private async sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
   // ── Copy Trade Replication ──────────────────────────────────────────
-  private async replicateToFollowers(type: string, stake: number, dur: number, durUnit: string, symbol: string, contractId: number, barrierDigit?: number) {
+  private async replicateToFollowers(type: string, stake: number, dur: number, durUnit: string, symbol: string, contractId: number, barrierDigit?: number, barrierOffset?: string) {
     if (store.copyPoolRef && store.getFollowers().some(f => f.active === 1)) {
-      store.copyPoolRef.replicationTrade(0, contractId, type, stake, dur, durUnit, symbol, barrierDigit).catch(() => {});
+      store.copyPoolRef.replicationTrade(0, contractId, type, stake, dur, durUnit, symbol, barrierDigit, barrierOffset).catch(() => {});
     }
   }
 
@@ -304,7 +304,7 @@ export class TradeEngine {
       const contractId = await this.deriv.buyContract(propResult.id, propResult.askPrice);
       state.activeContractId = contractId;
       store.addLog(`[${label}] Bought contract ${contractId}`, 'success');
-      this.replicateToFollowers(state.contractType, stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, contractId, digit || undefined).catch(() => {});
+      this.replicateToFollowers(state.contractType, stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, contractId, digit || undefined, cfg.barrierOffset).catch(() => {});
       store.broadcast();
 
       const result = await this.deriv.waitForResult(contractId);
@@ -476,9 +476,9 @@ export class TradeEngine {
       store.addLog(`[Leg 1] Bought ${buys[0]}`, 'success');
       store.addLog(`[Leg 2] Bought ${buys[1]}`, 'success');
       if (isTriple) store.addLog(`[Leg 3] Bought ${buys[2]}`, 'success');
-      this.replicateToFollowers(ct1, rs1, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buys[0], d1 || undefined).catch(() => {});
-      this.replicateToFollowers(ct2, rs2, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buys[1], d2 || undefined).catch(() => {});
-      if (isTriple) this.replicateToFollowers(ct3, rs3, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buys[2], d3 || undefined).catch(() => {});
+      this.replicateToFollowers(ct1, rs1, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buys[0], d1 || undefined, cfg.barrierOffset).catch(() => {});
+      this.replicateToFollowers(ct2, rs2, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buys[1], d2 || undefined, cfg.barrierOffset).catch(() => {});
+      if (isTriple) this.replicateToFollowers(ct3, rs3, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buys[2], d3 || undefined, cfg.barrierOffset).catch(() => {});
       store.broadcast();
 
       // Wait for outcomes
@@ -762,7 +762,7 @@ export class TradeEngine {
       const contractId = await this.deriv.buyContract(propResult.id, propResult.askPrice);
       store.leg1.activeContractId = contractId;
       store.addLog(`[${label}] Bought contract ${contractId}`, 'success');
-      this.replicateToFollowers(ct, stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, contractId).catch(() => {});
+      this.replicateToFollowers(ct, stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, contractId, undefined, cfg.barrierOffset).catch(() => {});
       store.broadcast();
 
       // Deal cancellation if configured
@@ -915,8 +915,8 @@ export class TradeEngine {
       store.leg2.activeContractId = buyDown;
       store.addLog(`[Multiplier Up] Bought ${buyUp}`, 'success');
       store.addLog(`[Multiplier Down] Bought ${buyDown}`, 'success');
-      this.replicateToFollowers('MULTUP', stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buyUp).catch(() => {});
-      this.replicateToFollowers('MULTDOWN', stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buyDown).catch(() => {});
+      this.replicateToFollowers('MULTUP', stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buyUp, undefined, cfg.barrierOffset).catch(() => {});
+      this.replicateToFollowers('MULTDOWN', stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, buyDown, undefined, cfg.barrierOffset).catch(() => {});
       store.broadcast();
 
       // Deal cancellation
@@ -1141,7 +1141,7 @@ export class TradeEngine {
         store.broadcast();
 
         store.addLog(`[MD Recovery] Bought DIFFER (hot=${this.mdHotDigit}) at $${mdStake.toFixed(2)} — contract ${contractId}`, 'info');
-        this.replicateToFollowers('DIGITDIFF', mdStake, 1, 't', cfg.symbol, contractId, this.mdHotDigit).catch(() => {});
+        this.replicateToFollowers('DIGITDIFF', mdStake, 1, 't', cfg.symbol, contractId, this.mdHotDigit, cfg.barrierOffset).catch(() => {});
 
         const result = await this.deriv.waitForResult(contractId);
         this.resolveCopyOutcomes(contractId).catch(() => {});
@@ -1189,8 +1189,8 @@ export class TradeEngine {
         store.leg2.label = 'MD Under 5';
         store.broadcast();
 
-        this.replicateToFollowers('DIGITOVER', mdStake, 1, 't', cfg.symbol, overId, 5).catch(() => {});
-        this.replicateToFollowers('DIGITUNDER', mdStake, 1, 't', cfg.symbol, underId, 5).catch(() => {});
+        this.replicateToFollowers('DIGITOVER', mdStake, 1, 't', cfg.symbol, overId, 5, cfg.barrierOffset).catch(() => {});
+        this.replicateToFollowers('DIGITUNDER', mdStake, 1, 't', cfg.symbol, underId, 5, cfg.barrierOffset).catch(() => {});
 
         const [overResult, underResult] = await Promise.all([
           this.deriv.waitForResult(overId),
@@ -1245,8 +1245,8 @@ export class TradeEngine {
         store.leg2.label = `MD Differ (hot=${this.mdHotDigit})`;
         store.broadcast();
 
-        this.replicateToFollowers('DIGITMATCH', mdStake, 1, 't', cfg.symbol, matchId, this.mdHotDigit).catch(() => {});
-        this.replicateToFollowers('DIGITDIFF', mdStake, 1, 't', cfg.symbol, diffId, this.mdHotDigit).catch(() => {});
+        this.replicateToFollowers('DIGITMATCH', mdStake, 1, 't', cfg.symbol, matchId, this.mdHotDigit, cfg.barrierOffset).catch(() => {});
+        this.replicateToFollowers('DIGITDIFF', mdStake, 1, 't', cfg.symbol, diffId, this.mdHotDigit, cfg.barrierOffset).catch(() => {});
 
         const [matchResult, diffResult] = await Promise.all([
           this.deriv.waitForResult(matchId),

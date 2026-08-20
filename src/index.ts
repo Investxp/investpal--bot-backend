@@ -19,6 +19,36 @@ import type { AgentConfig, AgentEngine } from './agent-engine.js';
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 
+// ── API authentication ─────────────────────────────────────────────
+// Set API_AUTH_TOKEN to protect every /api/* route and the /ws socket.
+// In production the server FAILS CLOSED: if no token is configured,
+// all /api/* requests are rejected with 503 until one is set.
+const API_TOKEN = process.env.API_AUTH_TOKEN || '';
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+function isAuthorized(req: express.Request): boolean {
+  if (!API_TOKEN) return IS_PROD ? false : true; // dev: open + warned; prod: fail closed
+  const auth = req.headers.authorization || '';
+  const key = (req.headers['x-api-key'] as string) || '';
+  return auth === `Bearer ${API_TOKEN}` || key === API_TOKEN;
+}
+
+function apiAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (isAuthorized(req)) return next();
+  if (!API_TOKEN && IS_PROD) {
+    return res.status(503).json({ error: 'Server misconfigured: API_AUTH_TOKEN environment variable is required in production' });
+  }
+  if (!API_TOKEN) {
+    console.warn('[Security] ⚠️  API_AUTH_TOKEN is NOT set — /api/* endpoints are OPEN (development mode only)');
+  }
+  return res.status(401).json({ error: 'Unauthorized: missing or invalid API token' });
+}
+
+// ── CORS: allow only known frontend origins ────────────────────────
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS
+  || 'http://localhost:3005,http://localhost:4003,http://localhost:3000,https://investpal-bot.onrender.com,https://investpal.online,https://investpal.io')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
 function createEngine(platform: Platform) {
   switch (platform) {
     case 'deriv': {
@@ -32,12 +62,22 @@ function createEngine(platform: Platform) {
 }
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(null, false); // no CORS headers → browser blocks the call
+  },
+}));
 app.use(express.json());
+// Protect every /api/* route with the shared token
+app.use('/api', apiAuth);
 app.use('/bot', express.static(path.join(process.cwd(), 'public', 'bot')));
 
 const server = createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+// noServer: the WebSocketServer does not self-register upgrade handling —
+// we intercept 'upgrade' on the HTTP server to enforce auth BEFORE the
+// handshake completes (proper ws v8 pattern).
+const wss = new WebSocketServer({ noServer: true });
 
 let engine: ReturnType<typeof createEngine> | null = null;
 let enginePlatform: Platform | null = null;
@@ -150,12 +190,12 @@ app.get('/api/copy-trade-logs', (req, res) => {
 
 // Replicate a master trade to all active followers
 app.post('/api/copy-replicate', async (req, res) => {
-  const { masterSignalId, masterContractId, type, stake, duration, durationUnit, symbol, barrierDigit } = req.body;
+  const { masterSignalId, masterContractId, type, stake, duration, durationUnit, symbol, barrierDigit, barrierOffset } = req.body;
   if (!type || !stake || !symbol || masterContractId == null) {
     return res.status(400).json({ error: 'Missing trade params' });
   }
   try {
-    await copyPool.replicationTrade(masterSignalId || 0, masterContractId, type, stake, duration, durationUnit, symbol, barrierDigit);
+    await copyPool.replicationTrade(masterSignalId || 0, masterContractId, type, stake, duration, durationUnit, symbol, barrierDigit, barrierOffset);
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -193,10 +233,10 @@ app.post('/api/copy-init', async (req, res) => {
 });
 
 app.post('/api/copy-trade', async (req, res) => {
-  const { type, stake, duration, durationUnit, symbol, barrierDigit } = req.body;
+  const { type, stake, duration, durationUnit, symbol, barrierDigit, barrierOffset } = req.body;
   if (!type || !stake || !symbol) return res.status(400).json({ error: 'Missing trade params' });
   try {
-    await copyPool.replicationTrade(0, 0, type, stake, duration, durationUnit, symbol, barrierDigit);
+    await copyPool.replicationTrade(0, 0, type, stake, duration, durationUnit, symbol, barrierDigit, barrierOffset);
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -275,6 +315,24 @@ app.get('/api/agent/status', (_req, res) => {
 });
 
 // ── WebSocket for real-time updates ──
+// Reject unauthenticated WS connections BEFORE the upgrade completes.
+server.on('upgrade', (req, socket, head) => {
+  const wsUrl = new URL(req.url || '/', 'http://localhost');
+  if (wsUrl.pathname !== '/ws') {
+    socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  if (API_TOKEN && wsUrl.searchParams.get('token') !== API_TOKEN) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit('connection', ws, req);
+  });
+});
+
 wss.on('connection', (ws) => {
   ws.send(JSON.stringify({ type: 'status', data: store.getStatus() }));
   const heartbeat = setInterval(() => { if (ws.readyState === WsSocket.OPEN) ws.ping(); }, 25000);
