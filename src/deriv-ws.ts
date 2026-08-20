@@ -51,6 +51,7 @@ export class DerivClient {
           hostname: url.hostname,
           path: url.pathname,
           method: 'POST',
+          timeout: 20000,
           headers: {
             'Deriv-App-ID': this.appId,
             'Authorization': `Bearer ${oauthToken}`,
@@ -77,6 +78,7 @@ export class DerivClient {
         },
       );
       req.on('error', reject);
+      req.on('timeout', () => req.destroy(new Error('Timed out requesting OTP session')));
       req.write(postData);
       req.end();
     });
@@ -210,6 +212,12 @@ export class DerivClient {
     this.reconnectAttempts++;
     this.reconnectTimer = setTimeout(async () => {
       try {
+        // OTP WebSocket URLs are temporary — fetch a fresh session before reconnecting
+        if (this.oauthToken && this.accountIdForReconnect) {
+          try {
+            this.otpWsUrl = await this.callOtpApi(this.oauthToken, this.accountIdForReconnect);
+          } catch { /* keep the old URL as a last resort */ }
+        }
         await this.connect();
         await this.resubscribeTicks();
         this.onStatusChange?.(true);
