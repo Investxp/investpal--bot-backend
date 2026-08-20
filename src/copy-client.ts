@@ -51,6 +51,7 @@ class CopyClient {
         {
           hostname: 'api.derivws.com',
           path: '/trading/v1/options/accounts',
+          timeout: 20000,
           headers: {
             'Deriv-App-ID': OAUTH_CLIENT_ID,
             'Authorization': `Bearer ${token}`,
@@ -98,6 +99,7 @@ class CopyClient {
         },
       );
       req.on('error', reject);
+      req.on('timeout', () => req.destroy(new Error('Timed out resolving account')));
     });
   }
 
@@ -110,6 +112,7 @@ class CopyClient {
           hostname: url.hostname,
           path: url.pathname,
           method: 'POST',
+          timeout: 20000,
           headers: {
             'Deriv-App-ID': OAUTH_CLIENT_ID,
             'Authorization': `Bearer ${token}`,
@@ -136,6 +139,7 @@ class CopyClient {
         },
       );
       req.on('error', reject);
+      req.on('timeout', () => req.destroy(new Error('Timed out requesting OTP session')));
       req.write(postData);
       req.end();
     });
@@ -144,13 +148,31 @@ class CopyClient {
   private connectTo(url: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
-      ws.on('open', () => { this.ws = ws; resolve(); });
-      ws.on('error', () => reject(new Error(`Failed to connect to ${url}`)));
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) { settled = true; try { ws.terminate(); } catch {} reject(new Error(`WebSocket connect timed out for ${url}`)); }
+      }, 15000);
+      ws.on('open', () => {
+        if (settled) return;
+        clearTimeout(timer);
+        settled = true;
+        this.ws = ws;
+        resolve();
+      });
+      ws.on('error', (err) => {
+        if (!settled) {
+          clearTimeout(timer);
+          settled = true;
+          reject(new Error(`Failed to connect to ${url}: ${err.message || err}`));
+        }
+      });
       ws.on('close', () => {
+        clearTimeout(timer);
         this._connected = false;
         this.pending.forEach(({ reject, timer }) => { clearTimeout(timer); reject(new Error('Connection closed')); });
         this.pending.clear();
         this.ws = null;
+        if (!settled) { settled = true; reject(new Error('WebSocket closed before open')); }
       });
       ws.on('message', (raw) => {
         try {
@@ -242,20 +264,48 @@ class CopyClient {
 
 export class CopyTradingPool {
   private clients = new Map<number, CopyClient>();
+  private lastAttempt = new Map<number, number>();
+  private resyncTimer: NodeJS.Timeout | null = null;
+
+  /** Periodically re-sync so failed follower connections self-heal.
+   *  Call once at server startup. */
+  startAutoResync(intervalMs = 30000) {
+    this.stopAutoResync();
+    this.resyncTimer = setInterval(() => this.sync(), intervalMs);
+    if (this.resyncTimer.unref) this.resyncTimer.unref();
+  }
+
+  stopAutoResync() {
+    if (this.resyncTimer) { clearInterval(this.resyncTimer); this.resyncTimer = null; }
+  }
 
   sync() {
     const followers = store.getFollowers().filter(f => f.active === 1);
     const activeIds = new Set(followers.map(f => f.id));
+    const now = Date.now();
 
     for (const [fid, client] of this.clients) {
       if (!activeIds.has(fid)) {
         client.disconnect();
         this.clients.delete(fid);
+        this.lastAttempt.delete(fid);
       }
     }
 
     for (const f of followers) {
-      if (this.clients.has(f.id)) continue;
+      const existing = this.clients.get(f.id);
+      // Already connected — leave it alone
+      if (existing && existing.connected) continue;
+
+      const lastTry = this.lastAttempt.get(f.id) ?? 0;
+      // Throttle reconnect attempts (never-drop PID protection + rate limits)
+      if (now - lastTry < 15000) continue;
+
+      // Drop a dead/hung client and retry fresh
+      if (existing) { existing.disconnect(); }
+      this.clients.delete(f.id);
+      this.lastAttempt.set(f.id, now);
+
       const client = new CopyClient();
       // Map copy_type to preferred account type
       const preferredAccountType: 'demo' | 'live' | undefined =
@@ -268,6 +318,7 @@ export class CopyTradingPool {
         store.addLog(`[CopyPool] Connected follower: ${f.name} (${f.id})`, 'success');
       }).catch((err) => {
         store.addLog(`[CopyPool] Failed to connect follower ${f.name}: ${err.message}`, 'error');
+        this.clients.delete(f.id);
       });
       this.clients.set(f.id, client);
     }

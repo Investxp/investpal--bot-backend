@@ -84,6 +84,7 @@ let enginePlatform: Platform | null = null;
 let derivClient: DerivClient | null = null;
 const copyPool = new CopyTradingPool();
 store.copyPoolRef = copyPool;
+copyPool.startAutoResync(30000);
 
 function broadcastStatus(msg: Record<string, any>) {
   const json = JSON.stringify(msg);
