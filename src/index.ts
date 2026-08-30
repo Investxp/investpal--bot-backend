@@ -28,6 +28,7 @@ import { getRequestSession, parseBearerToken } from './auth.js';
 import { createStrategyVersion, findLatestVersion, rollbackStrategyToVersion, validateVersionChain, type StrategyVersionRecord } from './strategy-versioning.js';
 import { evaluateCapitalProtection } from './capital-protection.js';
 import { createJobQueue, createExecutionJob } from './job-queue.js';
+import { createAdminDashboard } from './admin-dashboard.js';
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 
@@ -172,7 +173,10 @@ function broadcastStatus(msg: Record<string, any>) {
   });
 }
 
-const strategyVersionStore = new Map<string, StrategyVersionRecord[]>();const executionQueue = createJobQueue({ maxAttempts: 3 });
+const strategyVersionStore = new Map<string, StrategyVersionRecord[]>();
+const executionQueue = createJobQueue({ maxAttempts: 3 });
+const adminDashboard = createAdminDashboard();
+
 // ── REST API ─────────────────────────────────────────────────────────
 app.get('/api/status', (_req, res) => {
   res.json(store.getStatus());
@@ -226,6 +230,24 @@ app.post('/api/strategies/:id/versions/rollback', (req, res) => {
   } catch (error) {
     res.status(422).json({ error: error instanceof Error ? error.message : 'Rollback failed' });
   }
+});
+
+app.get('/api/admin/dashboard', (req, res) => {
+  res.json(adminDashboard.getState());
+});
+
+app.get('/api/admin/events', (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 1000);
+  const events = adminDashboard.getRecentEvents(limit);
+  res.json({ events, count: events.length });
+});
+
+app.get('/api/admin/health', (req, res) => {
+  res.json(adminDashboard.getHealth());
+});
+
+app.get('/api/admin/rollback-plan', (req, res) => {
+  res.json(adminDashboard.getRollbackInstructions());
 });
 
 app.get('/api/account-context', (_req, res) => {
