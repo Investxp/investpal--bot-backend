@@ -24,6 +24,10 @@ import { IdempotencyService } from './idempotency.js';
 import { AuditLogger } from './audit-logger.js';
 import { TradeJournal } from './trade-journal.js';
 import { AccountAuthorization } from './account-authorization.js';
+import { getRequestSession, parseBearerToken } from './auth.js';
+import { createStrategyVersion, findLatestVersion, rollbackStrategyToVersion, validateVersionChain, type StrategyVersionRecord } from './strategy-versioning.js';
+import { evaluateCapitalProtection } from './capital-protection.js';
+import { createJobQueue, createExecutionJob } from './job-queue.js';
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 
@@ -35,10 +39,15 @@ const API_TOKEN = process.env.API_AUTH_TOKEN || '';
 const IS_PROD = process.env.NODE_ENV === 'production';
 
 function isAuthorized(req: express.Request): boolean {
+  const session = getRequestSession(req as any);
+  if (session) {
+    return true;
+  }
+
   if (!API_TOKEN) return IS_PROD ? false : true; // dev: open + warned; prod: fail closed
   const auth = req.headers.authorization || '';
   const key = (req.headers['x-api-key'] as string) || '';
-  return auth === `Bearer ${API_TOKEN}` || key === API_TOKEN;
+  return auth === `Bearer ${API_TOKEN}` || key === API_TOKEN || parseBearerToken(req as any) === API_TOKEN;
 }
 
 function apiAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -49,7 +58,7 @@ function apiAuth(req: express.Request, res: express.Response, next: express.Next
   if (!API_TOKEN) {
     console.warn('[Security] ⚠️  API_AUTH_TOKEN is NOT set — /api/* endpoints are OPEN (development mode only)');
   }
-  return res.status(401).json({ error: 'Unauthorized: missing or invalid API token' });
+  return res.status(401).json({ error: 'Unauthorized: missing or invalid API token or session' });
 }
 
 const apiRateWindows = new Map<string, { startedAt: number; count: number }>();
@@ -163,9 +172,60 @@ function broadcastStatus(msg: Record<string, any>) {
   });
 }
 
+const strategyVersionStore = new Map<string, StrategyVersionRecord[]>();const executionQueue = createJobQueue({ maxAttempts: 3 });
 // ── REST API ─────────────────────────────────────────────────────────
 app.get('/api/status', (_req, res) => {
   res.json(store.getStatus());
+});
+
+app.get('/api/strategies/:id/versions', (req, res) => {
+  const versions = strategyVersionStore.get(req.params.id) ?? [];
+  res.json({ strategyId: req.params.id, versions, latest: findLatestVersion(versions) });
+});
+
+app.post('/api/strategies/:id/versions', (req, res) => {
+  const { version, config, status = 'draft' } = req.body ?? {};
+  if (!version || typeof version !== 'string') {
+    return res.status(400).json({ error: 'version is required' });
+  }
+
+  const existing = strategyVersionStore.get(req.params.id) ?? [];
+  const next = createStrategyVersion({ strategyId: req.params.id, version, config, status });
+  const merged = [...existing, next];
+  const validation = validateVersionChain(merged);
+  if (!validation.valid) {
+    return res.status(422).json({ error: validation.error || 'Invalid version chain' });
+  }
+
+  strategyVersionStore.set(req.params.id, merged);
+  res.status(201).json({ strategyId: req.params.id, version: next, latest: findLatestVersion(merged) });
+});
+
+app.post('/api/strategies/:id/versions/rollback', (req, res) => {
+  const { targetVersion, currentVersion, currentConfig } = req.body ?? {};
+  if (!targetVersion || typeof targetVersion !== 'string') {
+    return res.status(400).json({ error: 'targetVersion is required' });
+  }
+
+  const versions = strategyVersionStore.get(req.params.id) ?? [];
+  if (versions.length === 0) {
+    return res.status(404).json({ error: 'No versions found for this strategy' });
+  }
+
+  try {
+    const rolled = rollbackStrategyToVersion({
+      strategyId: req.params.id,
+      currentVersion: currentVersion ?? findLatestVersion(versions)?.version ?? '',
+      currentConfig: currentConfig ?? findLatestVersion(versions)?.config ?? {},
+      versions,
+      targetVersion,
+    });
+    const updated = versions.map((item) => (item.version === rolled.version ? rolled : item));
+    strategyVersionStore.set(req.params.id, updated);
+    res.json({ strategyId: req.params.id, rolledVersion: rolled, latest: findLatestVersion(updated) });
+  } catch (error) {
+    res.status(422).json({ error: error instanceof Error ? error.message : 'Rollback failed' });
+  }
 });
 
 app.get('/api/account-context', (_req, res) => {
@@ -560,6 +620,50 @@ app.get('/ready', (_req, res) => {
     executionJournal: Boolean(process.env.EXECUTION_JOURNAL_PATH || process.env.NODE_ENV !== 'production'),
     emergencyStop: store.isEmergencyStopActive(),
   });
+});
+
+app.post('/api/capital-protection/preview', (req, res) => {
+  const input = req.body ?? {};
+  const decision = evaluateCapitalProtection({
+    realizedProfit: Number(input.realizedProfit ?? 0),
+    unrealizedProfit: Number(input.unrealizedProfit ?? 0),
+    exposure: Number(input.exposure ?? 0),
+    balance: Number(input.balance ?? 0),
+    equity: Number(input.equity ?? 0),
+    protectedProfit: Number(input.protectedProfit ?? 0),
+    maxExposure: Number(input.maxExposure ?? 250),
+    protectedProfitThreshold: Number(input.protectedProfitThreshold ?? 80),
+    maxDrawdown: Number(input.maxDrawdown ?? 150),
+  });
+
+  res.json(decision);
+});
+
+app.post('/api/jobs/submit', (req, res) => {
+  const { executionId, accountId, symbol, stake, config } = req.body ?? {};
+  if (!executionId || !accountId || !symbol || !stake || !config) {
+    return res.status(400).json({ error: 'executionId, accountId, symbol, stake, and config are required' });
+  }
+
+  const job = createExecutionJob({ executionId, accountId, symbol, stake, config });
+  executionQueue.enqueue(job);
+  res.status(201).json({ jobId: job.id, status: 'PENDING' });
+});
+
+app.get('/api/jobs/:jobId', (req, res) => {
+  const job = executionQueue.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json(job);
+});
+
+app.get('/api/jobs/status/pending', (req, res) => {
+  const pending = executionQueue.getPending();
+  res.json({ count: pending.length, jobs: pending });
+});
+
+app.get('/api/jobs/status/processing', (req, res) => {
+  const processing = executionQueue.getProcessing();
+  res.json({ count: processing.length, jobs: processing });
 });
 
 // ── Live Authorization & Account Management ──────────────────────
