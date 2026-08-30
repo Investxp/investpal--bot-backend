@@ -5,8 +5,32 @@ services:
     repo: https://github.com/Investxp/investpal--bot-backend
     branch: master
     buildCommand: npm install && npm run build
-    startCommand: node dist/index.js
+    startCommand: npm run db:migrate && node dist/index.js
     envVars:
+      # ── Security hardening (mandatory in production) ────────────────
+      # NODE_ENV=production makes the API fail CLOSED: if API_AUTH_TOKEN is
+      # ever missing, every /api/* request returns 503 instead of trading.
+      - key: NODE_ENV
+        value: production
+      # Shared secret for all /api/* routes + /ws (Authorization: Bearer).
+      # Auto-generated on first deploy — COPY the generated value into the
+      # investpal-bot service as NEXT_PUBLIC_BOT_ENGINE_TOKEN.
+      - key: API_AUTH_TOKEN
+        generateValue: true
+      # Encryption key for followers.json (AES-256-GCM). Without it,
+      # follower credentials are never persisted to disk.
+      - key: STORE_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: EXECUTION_JOURNAL_PATH
+        value: /var/data/investpal/executions.json
+      - key: TRADING_CONTROL_PATH
+        value: /var/data/investpal/trading-control.json
+      # Comma-separated CORS allowlist of frontend origins.
+      - key: ALLOWED_ORIGINS
+        value: "http://localhost:3005,http://localhost:4003,http://localhost:3000,https://investpal-bot.onrender.com,https://investpal.online,https://investpal.io"
+      # ── Existing platform credentials (set in dashboard) ────────────
       - key: POLYMARKET_API_KEY
         sync: false
       - key: POLYMARKET_API_SECRET
@@ -21,3 +45,7 @@ services:
         sync: false
       - key: NODE_VERSION
         value: 22
+    disk:
+      name: investpal-data
+      mountPath: /var/data
+      sizeGB: 1

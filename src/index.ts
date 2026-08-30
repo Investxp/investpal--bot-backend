@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket as WsSocket } from 'ws';
 import { DerivClient } from './deriv-ws.js';
@@ -16,6 +17,13 @@ import { HybridAgent } from './agents/hybrid-agent.js';
 import type { TradeConfig, Platform } from './types.js';
 import type { CopyType } from './store.js';
 import type { AgentConfig, AgentEngine } from './agent-engine.js';
+import { evaluateTradeConfig, evaluateTradeRisk } from './risk-gate.js';
+import { PostgresExecutionPersistence } from './postgres-persistence.js';
+import { PaperExecutionAdapter } from './paper-execution.js';
+import { IdempotencyService } from './idempotency.js';
+import { AuditLogger } from './audit-logger.js';
+import { TradeJournal } from './trade-journal.js';
+import { AccountAuthorization } from './account-authorization.js';
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 
@@ -44,6 +52,24 @@ function apiAuth(req: express.Request, res: express.Response, next: express.Next
   return res.status(401).json({ error: 'Unauthorized: missing or invalid API token' });
 }
 
+const apiRateWindows = new Map<string, { startedAt: number; count: number }>();
+const rateLimitCleanupTimer = setInterval(() => {
+  const cutoff = Date.now() - 60_000;
+  for (const [key, window] of apiRateWindows) if (window.startedAt < cutoff) apiRateWindows.delete(key);
+}, 5 * 60 * 1000);
+function apiRateLimit(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const now = Date.now();
+  const key = req.ip || req.socket.remoteAddress || 'unknown';
+  const current = apiRateWindows.get(key);
+  if (!current || now - current.startedAt >= 60_000) {
+    apiRateWindows.set(key, { startedAt: now, count: 1 });
+    return next();
+  }
+  current.count++;
+  if (current.count > 120) return res.status(429).json({ error: 'Too many API requests; retry shortly' });
+  return next();
+}
+
 // ── CORS: allow only known frontend origins ────────────────────────
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS
   || 'http://localhost:3005,http://localhost:4003,http://localhost:3000,https://investpal-bot.onrender.com,https://investpal.online,https://investpal.io')
@@ -62,15 +88,27 @@ function createEngine(platform: Platform) {
 }
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(cors({
   origin(origin, cb) {
     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
     return cb(null, false); // no CORS headers → browser blocks the call
   },
 }));
-app.use(express.json());
+app.use(express.json({ limit: '256kb' }));
+app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  const supplied = _req.header('X-Correlation-ID');
+  const correlationId = supplied && /^[a-zA-Z0-9._:-]{1,100}$/.test(supplied) ? supplied : randomUUID();
+  res.setHeader('X-Correlation-ID', correlationId);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 // Protect every /api/* route with the shared token
-app.use('/api', apiAuth);
+app.use('/api', apiRateLimit, apiAuth);
 app.use('/bot', express.static(path.join(process.cwd(), 'public', 'bot')));
 
 const server = createServer(app);
@@ -82,9 +120,41 @@ const wss = new WebSocketServer({ noServer: true });
 let engine: ReturnType<typeof createEngine> | null = null;
 let enginePlatform: Platform | null = null;
 let derivClient: DerivClient | null = null;
+let postgresPersistence: PostgresExecutionPersistence | null = null;
+let idempotencyService: IdempotencyService;
+let auditLogger: AuditLogger;
+let tradeJournal: TradeJournal;
+let accountAuthz: AccountAuthorization;
 const copyPool = new CopyTradingPool();
+const paperAdapter = new PaperExecutionAdapter();
 store.copyPoolRef = copyPool;
 copyPool.startAutoResync(30000);
+const reconciliationTimer = setInterval(() => {
+  if (!derivClient?.connected || store.getExecutions(1).length === 0) return;
+  fetch(`http://127.0.0.1:${PORT}/api/reconciliation/run`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${API_TOKEN}` },
+  }).catch((error: unknown) => store.addLog(`[Reconciliation] Scheduled run failed: ${error instanceof Error ? error.message : 'unknown error'}`, 'warn'));
+}, 5 * 60 * 1000);
+
+if (process.env.DATABASE_URL) {
+  const persistence = new PostgresExecutionPersistence(process.env.DATABASE_URL);
+  postgresPersistence = persistence;
+  const pool = persistence['pool'] || null; // Access internal pool for other services
+  idempotencyService = new IdempotencyService(pool);
+  auditLogger = new AuditLogger(pool);
+  tradeJournal = new TradeJournal(pool);
+  accountAuthz = new AccountAuthorization(pool);
+  store.configureExecutionPersistence(persistence);
+  persistence.check().then(() => store.restoreExecutions()).catch((error: unknown) => {
+    store.addLog(`[Persistence] PostgreSQL unavailable: ${error instanceof Error ? error.message : 'unknown error'}`, 'error');
+  });
+} else {
+  idempotencyService = new IdempotencyService(null);
+  auditLogger = new AuditLogger(null);
+  tradeJournal = new TradeJournal(null);
+  accountAuthz = new AccountAuthorization(null);
+}
 
 function broadcastStatus(msg: Record<string, any>) {
   const json = JSON.stringify(msg);
@@ -96,6 +166,97 @@ function broadcastStatus(msg: Record<string, any>) {
 // ── REST API ─────────────────────────────────────────────────────────
 app.get('/api/status', (_req, res) => {
   res.json(store.getStatus());
+});
+
+app.get('/api/account-context', (_req, res) => {
+  res.json({ accountId: derivClient?.accountId ?? null, connected: derivClient?.connected ?? false });
+});
+
+app.get('/api/executions', (req, res) => {
+  const limit = Number.parseInt(String(req.query.limit || '100'), 10);
+  res.json({ executions: store.getExecutions(Number.isFinite(limit) ? limit : 100) });
+});
+
+app.post('/api/paper/execute', (req, res) => {
+  const idempotencyKey = req.headers['idempotency-key'] as string || idempotencyService.generateKey();
+  const requestedConfig = { ...(req.body as Partial<TradeConfig>), platform: 'deriv', executionMode: 'paper' } as TradeConfig;
+  const decision = evaluateTradeConfig(requestedConfig);
+  if (!decision.approved) return res.status(422).json({ error: 'Paper configuration blocked by risk gate', reasons: decision.reasons });
+  if (store.isEmergencyStopActive()) return res.status(423).json({ error: 'Paper execution blocked by emergency stop' });
+  
+  const config = decision.normalizedConfig;
+  const execution = store.beginExecution({ leg: 'leg1', accountId: null, symbol: config.symbol, contractType: String(req.body.contractType || 'CALL'), stake: config.baseStake, idempotencyKey });
+  try {
+    store.updateExecution(execution.executionId, 'RISK_CHECK');
+    
+    // Trade-level risk validation
+    const tradeRiskDecision = evaluateTradeRisk(config, config.baseStake, store.stats, store.leg1);
+    if (!tradeRiskDecision.approved) {
+      store.updateExecution(execution.executionId, 'RISK_BLOCKED', { error: tradeRiskDecision.reason });
+      return res.status(422).json({ error: 'Paper execution blocked by trade-level risk gate', reason: tradeRiskDecision.reason });
+    }
+    
+    store.updateExecution(execution.executionId, 'APPROVED');
+    const contract = paperAdapter.place(execution.executionId, config.symbol, execution.contractType, config.baseStake);
+    store.updateExecution(execution.executionId, 'OPEN', { contractId: contract.contractId });
+    res.status(201).json({ mode: 'paper', execution: store.getExecution(execution.executionId), contract, idempotencyKey });
+  } catch (error) {
+    store.updateExecution(execution.executionId, 'FAILED', { error: error instanceof Error ? error.message : 'Paper execution failed' });
+    res.status(500).json({ error: 'Paper execution failed' });
+  }
+});
+
+app.post('/api/paper/settle/:executionId', (req, res) => {
+  const execution = store.getExecution(req.params.executionId);
+  if (!execution || execution.contractId === null) return res.status(404).json({ error: 'Paper execution not found' });
+  if (execution.state !== 'OPEN') return res.status(409).json({ error: 'Paper execution is not open' });
+  try {
+    const contract = paperAdapter.settle(execution.contractId, req.body?.won === true, Number(req.body?.payout || 0));
+    store.updateExecution(execution.executionId, 'RESULT', { result: contract.status === 'won' ? 'win' : 'loss', profit: contract.profit });
+    res.json({ mode: 'paper', execution: store.getExecution(execution.executionId), contract });
+  } catch (error) {
+    res.status(422).json({ error: error instanceof Error ? error.message : 'Paper settlement failed' });
+  }
+});
+
+app.post('/api/reconciliation/run', async (_req, res) => {
+  if (!derivClient?.connected) return res.status(409).json({ error: 'Deriv connection is not available' });
+  const candidates = store.getExecutions(500).filter((execution) => execution.accountId === derivClient?.accountId && execution.contractId !== null);
+  const discrepancies: Array<{ executionId: string; contractId: number; issue: string; brokerState?: string; brokerProfit?: number }> = [];
+  for (const execution of candidates) {
+    try {
+      const broker = await derivClient.getContractStatus(execution.contractId!);
+      const terminal = ['won', 'profit', 'sold', 'lost'].includes(broker.status);
+      if (execution.state === 'OPEN' && terminal) {
+        discrepancies.push({ executionId: execution.executionId, contractId: execution.contractId!, issue: 'Local execution is open but broker reports terminal', brokerState: broker.status, brokerProfit: broker.profit });
+      }
+      if (execution.state === 'RESULT' && !terminal) {
+        discrepancies.push({ executionId: execution.executionId, contractId: execution.contractId!, issue: 'Local execution is settled but broker reports non-terminal', brokerState: broker.status, brokerProfit: broker.profit });
+      }
+      if (execution.state === 'RESULT' && execution.profit !== null && Math.abs(execution.profit - broker.profit) > 0.01) {
+        discrepancies.push({ executionId: execution.executionId, contractId: execution.contractId!, issue: 'Profit differs from broker record', brokerState: broker.status, brokerProfit: broker.profit });
+      }
+    } catch (error) {
+      discrepancies.push({ executionId: execution.executionId, contractId: execution.contractId!, issue: `Broker lookup failed: ${error instanceof Error ? error.message : 'unknown error'}` });
+    }
+  }
+  store.addLog(`[Reconciliation] Checked ${candidates.length} execution(s); ${discrepancies.length} discrepancy(ies)`, discrepancies.length ? 'warn' : 'success');
+  res.json({ checked: candidates.length, discrepancies, checkedAt: new Date().toISOString() });
+});
+
+app.get('/api/emergency-stop', (_req, res) => {
+  res.json({ active: store.isEmergencyStopActive() });
+});
+
+app.post('/api/emergency-stop', (req, res) => {
+  store.triggerEmergencyStop(typeof req.body?.reason === 'string' ? req.body.reason : undefined);
+  if (engine) void engine.stop('Emergency stop');
+  res.json({ ok: true, active: true });
+});
+
+app.delete('/api/emergency-stop', (_req, res) => {
+  store.clearEmergencyStop();
+  res.json({ ok: true, active: false });
 });
 
 app.post('/api/initialize-connection', async (req, res) => {
@@ -120,19 +281,109 @@ app.post('/api/initialize-connection', async (req, res) => {
 
 app.post('/api/start', async (req, res) => {
   if (store.isRunning) return res.status(400).json({ error: 'Already running' });
-  const config: TradeConfig = req.body;
+  if (store.isEmergencyStopActive()) return res.status(423).json({ error: 'Trading is blocked by emergency stop' });
+  
+  // Generate idempotency key for this request
+  const idempotencyKey = req.headers['idempotency-key'] as string || idempotencyService.generateKey();
+  const requestedConfig = { ...(req.body as Partial<TradeConfig>), platform: (req.body as Partial<TradeConfig>).platform || 'deriv' } as TradeConfig;
+  
+  const decision = evaluateTradeConfig(requestedConfig);
+  if (!decision.approved) {
+    store.addLog(`[Risk] Start blocked: ${decision.reasons.join('; ')}`, 'error');
+    return res.status(422).json({ error: 'Trade configuration blocked by risk gate', reasons: decision.reasons });
+  }
+  
+  const config = decision.normalizedConfig;
+  for (const warning of decision.warnings) store.addLog(`[Risk] ${warning}`, 'warn');
   const platform: Platform = config.platform || 'deriv';
+  const executionMode = config.executionMode || 'demo';
+  
+  // Determine account ID based on platform and mode
+  let accountId: string | null = null;
+  if (platform === 'deriv' && derivClient?.accountId) {
+    accountId = derivClient.accountId;
+  }
+  
+  // Check idempotency key to prevent duplicate submissions
+  if (postgresPersistence && accountId) {
+    const existingExecutionId = await postgresPersistence.checkIdempotencyKey(accountId, idempotencyKey);
+    if (existingExecutionId) {
+      const cachedExecution = store.getExecution(existingExecutionId);
+      if (cachedExecution) {
+        store.addLog(`[Idempotency] Duplicate request detected; returning cached result`, 'warn');
+        return res.status(200).json({ ok: true, platform, executionId: existingExecutionId, cached: true });
+      }
+    }
+  }
+  
+  // Handle paper trading mode
+  if (executionMode === 'paper') {
+    try {
+      store.reset(config);
+      const execution = store.beginExecution({ leg: 'leg1', accountId, symbol: config.symbol, contractType: 'CALL', stake: config.baseStake, idempotencyKey });
+      store.updateExecution(execution.executionId, 'VALIDATING');
+      store.updateExecution(execution.executionId, 'RISK_CHECK');
+      store.updateExecution(execution.executionId, 'APPROVED');
+      
+      // Create initial paper contract for testing
+      const paperContract = paperAdapter.place(execution.executionId, config.symbol, 'CALL', config.baseStake);
+      store.updateExecution(execution.executionId, 'OPEN', { contractId: paperContract.contractId });
+      store.addLog(`[Paper] Paper trading session started (execution: ${execution.executionId})`, 'success');
+      
+      res.status(201).json({ 
+        ok: true, 
+        mode: 'paper', 
+        platform, 
+        executionId: execution.executionId,
+        idempotencyKey,
+        contract: paperContract 
+      });
+    } catch (err: any) {
+      store.addLog(`[Paper] Paper execution failed: ${err.message}`, 'error');
+      res.status(500).json({ error: 'Paper execution initialization failed' });
+    }
+    return;
+  }
+  
+  if (executionMode === 'backtest') {
+    return res.status(501).json({ error: `${executionMode} execution is not implemented; no broker trade was submitted` });
+  }
+  
+  if (executionMode === 'live' && (process.env.ALLOW_LIVE_TRADING !== 'true' || req.body?.confirmLive !== true)) {
+    store.addLog('[Risk] Live start blocked: explicit live authorization is missing', 'error');
+    return res.status(403).json({ error: 'Live trading requires ALLOW_LIVE_TRADING=true and confirmLive=true' });
+  }
+  
   if (platform === 'deriv' && (!derivClient || !derivClient.hasOtpUrl)) {
     return res.status(400).json({ error: 'Deriv connection not initialized. Call /api/initialize-connection first.' });
   }
+  
+  const requestedAccountId = typeof req.body?.accountId === 'string' ? req.body.accountId : null;
+  if (platform === 'deriv' && requestedAccountId && requestedAccountId !== derivClient?.accountId) {
+    return res.status(403).json({ error: 'Requested account does not match the authenticated Deriv account' });
+  }
+  
+  if (platform === 'deriv' && config.executionMode && derivClient?.accountId) {
+    const isDemoAccount = derivClient.accountId.startsWith('VRTC') || derivClient.accountId.startsWith('DOT');
+    const isLiveAccount = derivClient.accountId.startsWith('CR') || derivClient.accountId.startsWith('ROT');
+    if (config.executionMode === 'demo' && !isDemoAccount) return res.status(403).json({ error: 'Demo mode requires a Deriv demo account' });
+    if (config.executionMode === 'live' && !isLiveAccount) return res.status(403).json({ error: 'Live mode requires a Deriv live account' });
+  }
+  
   try {
+    // Create initial execution record with idempotency key
+    const execution = store.beginExecution({ leg: 'leg1', accountId, symbol: config.symbol, contractType: 'CALL', stake: config.baseStake, idempotencyKey });
+    store.updateExecution(execution.executionId, 'VALIDATING');
+    
     engine = platform === 'deriv' ? new DerivEngine(derivClient!) : createEngine(platform);
     enginePlatform = platform;
     engine.start(config).catch((err: Error) => {
       store.addLog(`[System] Engine error: ${err.message}`, 'error');
+      store.updateExecution(execution.executionId, 'FAILED', { error: err.message });
       store.stop('Engine error');
     });
-    res.json({ ok: true, platform });
+    
+    res.json({ ok: true, platform, executionId: execution.executionId, idempotencyKey });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -295,7 +546,98 @@ app.get('/', (_req, res) => {
 });
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', running: store.isRunning, platform: enginePlatform, connected: engine ? (engine as any).deriv?.connected ?? null : null });
+  res.json({ status: 'ok', running: store.isRunning, platform: enginePlatform, connected: derivClient?.connected ?? null, emergencyStop: store.isEmergencyStopActive() });
+});
+
+app.get('/ready', (_req, res) => {
+  const apiAuthConfigured = Boolean(process.env.API_AUTH_TOKEN);
+  const databaseConfigured = Boolean(process.env.DATABASE_URL);
+  const ready = process.env.NODE_ENV !== 'production' || (apiAuthConfigured && databaseConfigured);
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ready' : 'not_ready',
+    apiAuthConfigured,
+    databaseConfigured,
+    executionJournal: Boolean(process.env.EXECUTION_JOURNAL_PATH || process.env.NODE_ENV !== 'production'),
+    emergencyStop: store.isEmergencyStopActive(),
+  });
+});
+
+// ── Live Authorization & Account Management ──────────────────────
+app.post('/api/account/authorize-live', async (req, res) => {
+  const correlationId = res.getHeader('X-Correlation-ID') as string;
+  if (!derivClient?.accountId) return res.status(400).json({ error: 'No account connected' });
+  
+  const { confirm } = req.body;
+  if (confirm !== true) {
+    accountAuthz.revokeLiveAuthorization(derivClient.accountId);
+    await auditLogger.logLiveAuthorizationAttempt(correlationId, derivClient.accountId, false, 'User did not confirm');
+    return res.json({ authorized: false, message: 'Live trading authorization revoked' });
+  }
+  
+  // Validate account type
+  const authResult = await accountAuthz.authorizeAccount(derivClient.accountId, 'live', false);
+  if (!authResult.authorized) {
+    await auditLogger.logLiveAuthorizationAttempt(correlationId, derivClient.accountId, false, authResult.reason);
+    return res.status(403).json({ error: authResult.reason });
+  }
+  
+  // Record live authorization (30-min validity)
+  await accountAuthz.recordLiveAuthorization(derivClient.accountId, true);
+  await auditLogger.logLiveAuthorizationAttempt(correlationId, derivClient.accountId, true, 'User confirmed live trading');
+  
+  res.json({ authorized: true, accountId: derivClient.accountId, expiresIn: '30 minutes' });
+});
+
+app.get('/api/account/info', (req, res) => {
+  if (!derivClient?.accountId) return res.status(400).json({ error: 'No account connected' });
+  
+  const isLiveAuthorized = accountAuthz.isLiveAuthConfirmed(derivClient.accountId);
+  const isDemoAccount = derivClient.accountId.startsWith('VRTC') || derivClient.accountId.startsWith('DOT');
+  const isLiveAccount = derivClient.accountId.startsWith('CR') || derivClient.accountId.startsWith('ROT');
+  
+  res.json({
+    accountId: derivClient.accountId,
+    accountType: isDemoAccount ? 'demo' : isLiveAccount ? 'live' : 'unknown',
+    connected: derivClient.connected,
+    liveAuthorizationActive: isLiveAuthorized,
+  });
+});
+
+// ── Trade Journal Endpoints ────────────────────────────────────────
+app.get('/api/trades', async (req, res) => {
+  if (!derivClient?.accountId) return res.status(400).json({ error: 'No account connected' });
+  
+  const limit = Math.min(Number(req.query.limit) || 100, 1000);
+  const offset = Number(req.query.offset) || 0;
+  const trades = await tradeJournal.getAccountTrades(derivClient.accountId, limit, offset);
+  
+  res.json({ trades, count: trades.length, limit, offset });
+});
+
+app.get('/api/trades/stats', async (req, res) => {
+  if (!derivClient?.accountId) return res.status(400).json({ error: 'No account connected' });
+  
+  const stats = await tradeJournal.getAccountStats(derivClient.accountId);
+  res.json(stats || {});
+});
+
+app.get('/api/trades/export', async (req, res) => {
+  if (!derivClient?.accountId) return res.status(400).json({ error: 'No account connected' });
+  
+  const csv = await tradeJournal.exportTradesCSV(derivClient.accountId, 10000);
+  if (!csv) return res.status(503).json({ error: 'Export unavailable' });
+  
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename=trades.csv');
+  res.send(csv);
+});
+
+// ── Audit Log Endpoints ────────────────────────────────────────────
+app.get('/api/audit-logs', (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 1000);
+  const logs = auditLogger.getRecentLogs(limit);
+  
+  res.json({ logs, count: logs.length });
 });
 
 // ── Autonomous Trading Agent Routes ──
@@ -303,6 +645,7 @@ let currentAgent: AgentEngine | null = null;
 
 app.post('/api/agent/start', async (req, res) => {
   if (currentAgent?.isRunning) return res.status(400).json({ error: 'Agent already running' });
+  if (store.isEmergencyStopActive()) return res.status(423).json({ error: 'Trading is blocked by emergency stop' });
   const agentConfig: AgentConfig = req.body;
   if (!agentConfig.agentType || !agentConfig.profitTarget) {
     return res.status(400).json({ error: 'agentType and profitTarget required' });
@@ -381,8 +724,17 @@ server.listen(PORT, () => {
   }
 });
 
-process.on('SIGTERM', async () => {
+async function shutdown(signal: string) {
+  clearInterval(reconciliationTimer);
+  clearInterval(rateLimitCleanupTimer);
   if (engine) await engine.stop('Server shutdown');
+  if (derivClient) derivClient.disconnect();
   copyPool.stopAll();
-  server.close();
-});
+  if (postgresPersistence) await postgresPersistence.close();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 10_000).unref();
+  console.log(`InvestPal shutdown requested by ${signal}`);
+}
+
+process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+process.once('SIGINT', () => { void shutdown('SIGINT'); });

@@ -8,6 +8,9 @@ interface MarketSnapshot {
   trend: 'up' | 'down' | 'sideways';
   lastPrice: number;
   tickCount: number;
+  /** true = snapshot derived from real market ticks */
+  real: boolean;
+  source: string;
 }
 
 const STRATEGY_RULES: Record<string, { idealVolatility: string; idealTrend: string; description: string }> = {
@@ -21,52 +24,156 @@ const STRATEGY_RULES: Record<string, { idealVolatility: string; idealTrend: stri
   'odd-only': { idealVolatility: 'low', idealTrend: 'sideways', description: 'Odd digit bias' },
 };
 
+const MAX_TICKS = 100;
+const MIN_TICKS_FOR_ANALYSIS = 5;
+const MIN_TICKS_FOR_TREND = 12;
+
+/** Extract the last digit of a price quote (Deriv pip convention). */
+function lastDigitOf(quote: number): number {
+  const s = quote.toString();
+  const dot = s.indexOf('.');
+  const pip = dot === -1 ? 0 : s.length - dot - 1;
+  const d = pip > 0 ? parseInt(s.slice(-1), 10) : Math.floor(Math.abs(quote) % 10);
+  return isNaN(d) ? 0 : d;
+}
+
 export class HybridAgent extends AgentEngine {
   readonly agentType = 'hybrid-agent';
   private lastSnapshot: MarketSnapshot | null = null;
 
+  /** Rolling buffer of REAL ticks from the live Deriv feed. */
+  private ticks: { quote: number; epoch: number }[] = [];
+  private tickUnsub: (() => void) | null = null;
+  private ticksSubscribed = false;
+
   constructor() {
     super('hybrid-agent');
+  }
+
+  async stop(reason?: string) {
+    if (this.tickUnsub) {
+      try { this.tickUnsub(); } catch { /* noop */ }
+      this.tickUnsub = null;
+    }
+    this.ticksSubscribed = false;
+    await super.stop(reason);
   }
 
   protected async gatherMarketContext(): Promise<string> {
     return JSON.stringify(this.lastSnapshot || {});
   }
 
-  private async scanMarket(): Promise<MarketSnapshot> {
-    const digits: number[] = [];
-    for (let i = 0; i < 20; i++) {
-      digits.push(Math.floor(Math.random() * 10));
+  private async ensureTickSubscription(): Promise<void> {
+    if (this.ticksSubscribed || !this.derivClient) return;
+    const symbol = this.config.symbol || 'R_100';
+    try {
+      this.tickUnsub = await this.derivClient.subscribeTicks(symbol, (tick) => {
+        if (!tick || typeof tick.quote !== 'number' || !isFinite(tick.quote)) return;
+        this.ticks.push({ quote: tick.quote, epoch: tick.epoch });
+        if (this.ticks.length > MAX_TICKS) this.ticks.shift();
+      });
+      this.ticksSubscribed = true;
+      this.log(`Subscribed to real tick feed on ${symbol}`);
+    } catch (err: any) {
+      this.log(`Tick subscription failed: ${err.message}`);
     }
+  }
+
+  /**
+   * Builds a market snapshot from REAL tick data (last N ticks from the
+   * live Deriv feed): digit frequencies, tick-to-tick volatility and a
+   * simple trend estimate. No randomness — deterministic analysis only.
+   */
+  private scanMarket(): MarketSnapshot {
+    const ticks = this.ticks;
+    if (ticks.length < MIN_TICKS_FOR_ANALYSIS) {
+      return {
+        digitFrequencies: {},
+        recentDigits: [],
+        volatility: 'low',
+        trend: 'sideways',
+        lastPrice: ticks.length ? ticks[ticks.length - 1].quote : NaN,
+        tickCount: ticks.length,
+        real: false,
+        source: `warming up — only ${ticks.length}/${MIN_TICKS_FOR_ANALYSIS} ticks received`,
+      };
+    }
+
+    const quotes = ticks.map(t => t.quote);
+    const lastPrice = quotes[quotes.length - 1];
+    const recent = quotes.slice(-20);
+    const digits = recent.map(lastDigitOf);
+
     const freq: Record<number, number> = {};
-    for (const d of digits) { freq[d] = (freq[d] || 0) + 1; }
+    for (const d of digits) freq[d] = (freq[d] || 0) + 1;
+
+    // Volatility: mean absolute tick-to-tick change, relative to price
+    const changes: number[] = [];
+    for (let i = 1; i < quotes.length; i++) {
+      const prev = quotes[i - 1];
+      if (prev === 0) continue;
+      changes.push(Math.abs(quotes[i] - prev) / prev);
+    }
+    const meanAbs = changes.length ? changes.reduce((a, b) => a + b, 0) / changes.length : 0;
     const volatility: 'low' | 'medium' | 'high' =
-      Math.random() > 0.6 ? 'high' : Math.random() > 0.3 ? 'medium' : 'low';
-    const trend: 'up' | 'down' | 'sideways' =
-      Math.random() > 0.6 ? 'up' : Math.random() > 0.3 ? 'down' : 'sideways';
+      meanAbs > 0.0002 ? 'high' : meanAbs > 0.00005 ? 'medium' : 'low';
+
+    // Trend: compare mean of last 10 ticks vs the 10 before
+    let trend: 'up' | 'down' | 'sideways' = 'sideways';
+    if (quotes.length >= MIN_TICKS_FOR_TREND) {
+      const recentWindow = quotes.slice(-10);
+      const priorWindow = quotes.slice(-20, -10);
+      const avgR = recentWindow.reduce((a, b) => a + b, 0) / recentWindow.length;
+      const avgP = priorWindow.reduce((a, b) => a + b, 0) / priorWindow.length;
+      const rel = avgP !== 0 ? (avgR - avgP) / avgP : 0;
+      trend = rel > 0.0002 ? 'up' : rel < -0.0002 ? 'down' : 'sideways';
+    }
+
     return {
       digitFrequencies: freq,
       recentDigits: digits,
       volatility,
       trend,
-      lastPrice: Math.random() * 100,
-      tickCount: digits.length,
+      lastPrice,
+      tickCount: ticks.length,
+      real: true,
+      source: `real ticks (${ticks.length} received, ${quotes.length} analyzed)`,
     };
   }
 
   protected async decide(): Promise<AgentDecision> {
+    await this.ensureTickSubscription();
+
     const pool = this.config.strategyPool || Object.keys(STRATEGY_RULES) as AutoTradeMode[];
-    this.lastSnapshot = await this.scanMarket();
+    this.lastSnapshot = this.scanMarket();
     const market = this.lastSnapshot;
 
-    // Score each strategy against market conditions
+    // Honest behaviour: never fabricate a trade on no data
+    if (!market.real) {
+      return {
+        action: 'wait',
+        reasoning: `No market data yet (${market.source}). Waiting for live ticks before trading.`,
+        marketContext: market.source,
+      };
+    }
+
+    const marketDesc = `${market.volatility} vol, ${market.trend} trend, ${market.tickCount} ticks`;
+
+    // Score each strategy against real market conditions (deterministic)
     const scored = pool.map(s => {
       const rules = STRATEGY_RULES[s];
       if (!rules) return { mode: s, score: 0 };
       let score = 50;
       if (rules.idealVolatility === market.volatility) score += 25;
       if (rules.idealTrend === market.trend) score += 15;
-      score += Math.random() * 20;
+      // Digit-bias bonus for digit strategies: strongest digit frequency
+      if (s.includes('even') || s.includes('odd')) {
+        const even = (market.digitFrequencies[0] || 0) + (market.digitFrequencies[2] || 0) + (market.digitFrequencies[4] || 0)
+          + (market.digitFrequencies[6] || 0) + (market.digitFrequencies[8] || 0);
+        const total = market.recentDigits.length || 1;
+        const evenBias = even / total;
+        if ((s.includes('even') && evenBias > 0.55) || (s.includes('odd') && evenBias < 0.45)) score += 10;
+      }
       return { mode: s, score };
     });
     scored.sort((a, b) => b.score - a.score);
@@ -74,9 +181,8 @@ export class HybridAgent extends AgentEngine {
     if (!best) return { action: 'wait', reasoning: 'No suitable strategy for current market' };
 
     const stake = this.calculateAdaptiveStake(best.score, market);
-    const marketDesc = `${market.volatility} vol, ${market.trend} trend`;
 
-    // Build LLM prompt with market data for final decision
+    // Build LLM prompt with real market data for final decision
     let llmDecision: string | null = null;
     try {
       llmDecision = await this.consultLLM(best.mode, stake, marketDesc);
@@ -108,7 +214,7 @@ export class HybridAgent extends AgentEngine {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.config.llmApiKey) headers['Authorization'] = `Bearer ${this.config.llmApiKey}`;
 
-    const prompt = `Market: ${market}. Scanner recommends ${strategy} at $${stake}. Profit target: $${this.config.profitTarget}, current: $${this.status.currentProfit.toFixed(2)}. Reply: "trade", "wait", or "stop". ONLY one word.`;
+    const prompt = `Live market data: ${market}. Scanner recommends ${strategy} at $${stake}. Profit target: $${this.config.profitTarget}, current: $${this.status.currentProfit.toFixed(2)}. Reply: "trade", "wait", or "stop". ONLY one word.`;
     const resp = await fetch(endpoint, {
       method: 'POST', headers,
       body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 10 }),
@@ -127,6 +233,8 @@ export class HybridAgent extends AgentEngine {
     else if (score < 50) multiplier = 0.5;
     if (market.volatility === 'high') multiplier *= 0.8;
     if (this.status.losses > this.status.wins + 2) multiplier *= 0.6;
-    return Math.max(base * multiplier, base * 0.25);
+    const stake = Math.max(base * multiplier, base * 0.25);
+    // Never exceed 3x base stake on a single agent trade
+    return Math.min(stake, base * 3);
   }
 }

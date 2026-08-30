@@ -15,12 +15,17 @@ export type AutoTradeMode =
   | 'vanilla' | 'vanilla-call-only' | 'vanilla-put-only'
   | 'multipliers' | 'multipliers-up-only' | 'multipliers-down-only';
 
+export type ExecutionMode = 'backtest' | 'paper' | 'demo' | 'live';
+
 export interface TradeConfig {
   platform: Platform;
+  executionMode?: ExecutionMode;
   mode: AutoTradeMode;
   symbol: string;
   baseStake: number;
   baseStake2?: number;
+  /** Hard per-trade stake cap (recovery/martingale included). Falls back to baseStake * 25. */
+  maxStake?: number;
   duration: number;
   durationUnit: 't' | 's' | 'm' | 'h' | 'd';
   martingaleMultiplier: number;
@@ -86,6 +91,25 @@ export interface TradeLog {
   timestamp: string;
   type: 'info' | 'success' | 'error' | 'warn';
   message: string;
+}
+
+export type ExecutionState = 'CREATED' | 'VALIDATING' | 'RISK_CHECK' | 'APPROVED' | 'SUBMITTING' | 'OPEN' | 'SETTLING' | 'RESULT' | 'FAILED' | 'TIMEOUT' | 'CANCELLED' | 'RISK_BLOCKED';
+
+export interface ExecutionRecord {
+  executionId: string;
+  accountId: string | null;
+  idempotencyKey?: string;
+  state: ExecutionState;
+  leg: 'leg1' | 'leg2' | 'leg3';
+  symbol: string;
+  contractType: string;
+  stake: number;
+  contractId: number | null;
+  result: 'win' | 'loss' | null;
+  profit: number | null;
+  createdAt: string;
+  updatedAt: string;
+  error: string | null;
 }
 
 export interface TradeStats {

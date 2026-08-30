@@ -34,6 +34,7 @@ export class TradeEngine {
   private dynamicWinLimit = 3;
   private consecutiveErrors = 0;
   private lastTradeTime = 0;
+  private readonly submittedProposals = new Map<string, Promise<number>>();
 
   // Match-Differ recovery
   private mdRecoveryActive = false;
@@ -42,6 +43,17 @@ export class TradeEngine {
   private mdHotDigit = 5;
 
   constructor(deriv: DerivClient) { this.deriv = deriv; }
+
+  private buyThroughGateway(proposalId: string, askPrice: number): Promise<number> {
+    if (store.isEmergencyStopActive()) return Promise.reject(new Error('Execution blocked by emergency stop'));
+    const existing = this.submittedProposals.get(proposalId);
+    if (existing) return existing;
+    const submission = this.deriv.buyContract(proposalId, askPrice).finally(() => {
+      this.submittedProposals.delete(proposalId);
+    });
+    this.submittedProposals.set(proposalId, submission);
+    return submission;
+  }
 
   private async sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -267,7 +279,7 @@ export class TradeEngine {
 
   // ── Single Trade ──────────────────────────────────────────────────
   private async executeTrade(leg: 'leg1' | 'leg2') {
-    if (!this.isRunning) return;
+    if (!this.isRunning || store.isEmergencyStopActive()) return;
     const cfg = this.config;
     const state = leg === 'leg1' ? store.leg1 : store.leg2;
     const baseStake = leg === 'leg1' ? cfg.baseStake : (cfg.baseStake2 ?? cfg.baseStake);
@@ -285,7 +297,9 @@ export class TradeEngine {
     if (!this.checkLimits()) return;
 
     // Propose & buy
+    const execution = store.beginExecution({ leg, accountId: this.deriv.accountId, symbol: cfg.symbol, contractType: state.contractType, stake });
     try {
+      store.updateExecution(execution.executionId, 'VALIDATING');
       store.addLog(`[${label}] Proposing at $${stake.toFixed(2)}...`, 'info');
       state.isTrading = true;
       store.broadcast();
@@ -301,13 +315,22 @@ export class TradeEngine {
         cfg.multiplier,
       );
 
-      const contractId = await this.deriv.buyContract(propResult.id, propResult.askPrice);
+      if (!this.isRunning || store.isEmergencyStopActive()) {
+        store.updateExecution(execution.executionId, 'CANCELLED', { error: 'Trading stopped before submission' });
+        state.isTrading = false;
+        return;
+      }
+
+      store.updateExecution(execution.executionId, 'SUBMITTING');
+      const contractId = await this.buyThroughGateway(propResult.id, propResult.askPrice);
+      store.updateExecution(execution.executionId, 'OPEN', { contractId });
       state.activeContractId = contractId;
       store.addLog(`[${label}] Bought contract ${contractId}`, 'success');
       this.replicateToFollowers(state.contractType, stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, contractId, digit || undefined, cfg.barrierOffset).catch(() => {});
       store.broadcast();
 
       const result = await this.deriv.waitForResult(contractId);
+      store.updateExecution(execution.executionId, 'RESULT', { result: result.won ? 'win' : 'loss', profit: result.profit });
       this.resolveCopyOutcomes(contractId).catch(() => {});
       state.activeContractId = null;
       state.lastResult = result.won ? 'win' : 'loss';
@@ -356,6 +379,7 @@ export class TradeEngine {
       store.broadcast();
 
     } catch (err: any) {
+      store.updateExecution(execution.executionId, 'FAILED', { error: err?.message || 'Trade execution failed' });
       state.isTrading = false;
       state.activeContractId = null;
       store.addLog(`[${label}] Error: ${err.message}`, 'error');
@@ -366,7 +390,7 @@ export class TradeEngine {
 
   // ── Hedge Round ────────────────────────────────────────────────────
   private async executeHedgeRound() {
-    if (!this.isRunning) return;
+    if (!this.isRunning || store.isEmergencyStopActive()) return;
     const cfg = this.config;
     const b2 = cfg.baseStake2 ?? cfg.baseStake;
 
@@ -377,7 +401,7 @@ export class TradeEngine {
       await this.sleep(wait);
     }
 
-    if (!this.checkLimits()) return;
+    if (!this.checkLimits() || store.isEmergencyStopActive()) return;
 
     // Resolve contract types & digits
     let ct1 = store.leg1.contractType;
@@ -465,9 +489,9 @@ export class TradeEngine {
       ]);
 
       const buys = await Promise.all([
-        this.deriv.buyContract(propResults[0].id, propResults[0].askPrice),
-        this.deriv.buyContract(propResults[1].id, propResults[1].askPrice),
-        ...(isTriple ? [this.deriv.buyContract(propResults[2].id, propResults[2].askPrice)] : []),
+        this.buyThroughGateway(propResults[0].id, propResults[0].askPrice),
+        this.buyThroughGateway(propResults[1].id, propResults[1].askPrice),
+        ...(isTriple ? [this.buyThroughGateway(propResults[2].id, propResults[2].askPrice)] : []),
       ]);
 
       store.leg1.activeContractId = buys[0];
@@ -759,7 +783,7 @@ export class TradeEngine {
         undefined, undefined, undefined, cfg.multiplier,
       );
 
-      const contractId = await this.deriv.buyContract(propResult.id, propResult.askPrice);
+      const contractId = await this.buyThroughGateway(propResult.id, propResult.askPrice);
       store.leg1.activeContractId = contractId;
       store.addLog(`[${label}] Bought contract ${contractId}`, 'success');
       this.replicateToFollowers(ct, stake, cfg.duration, cfg.durationUnit || 't', cfg.symbol, contractId, undefined, cfg.barrierOffset).catch(() => {});
@@ -907,8 +931,8 @@ export class TradeEngine {
 
       // Buy both simultaneously
       const [buyUp, buyDown] = await Promise.all([
-        this.deriv.buyContract(propUp.id, propUp.askPrice),
-        this.deriv.buyContract(propDown.id, propDown.askPrice),
+        this.buyThroughGateway(propUp.id, propUp.askPrice),
+        this.buyThroughGateway(propDown.id, propDown.askPrice),
       ]);
 
       store.leg1.activeContractId = buyUp;
@@ -1135,7 +1159,7 @@ export class TradeEngine {
         const diffProposal = await this.deriv.placeProposal(
           'DIGITDIFF', mdStake, cfg.symbol, 1, 't', this.mdHotDigit,
         );
-        const contractId = await this.deriv.buyContract(diffProposal.id, diffProposal.askPrice);
+          const contractId = await this.buyThroughGateway(diffProposal.id, diffProposal.askPrice);
         store.leg1.activeContractId = contractId;
         store.leg1.label = `MD Differ (hot=${this.mdHotDigit})`;
         store.broadcast();
@@ -1180,8 +1204,8 @@ export class TradeEngine {
           this.deriv.placeProposal('DIGITUNDER', mdStake, cfg.symbol, 1, 't', 5),
         ]);
         const [overId, underId] = await Promise.all([
-          this.deriv.buyContract(overProp.id, overProp.askPrice),
-          this.deriv.buyContract(underProp.id, underProp.askPrice),
+          this.buyThroughGateway(overProp.id, overProp.askPrice),
+          this.buyThroughGateway(underProp.id, underProp.askPrice),
         ]);
         store.leg1.activeContractId = overId;
         store.leg2.activeContractId = underId;
@@ -1236,8 +1260,8 @@ export class TradeEngine {
           this.deriv.placeProposal('DIGITDIFF', mdStake, cfg.symbol, 1, 't', this.mdHotDigit),
         ]);
         const [matchId, diffId] = await Promise.all([
-          this.deriv.buyContract(matchProp.id, matchProp.askPrice),
-          this.deriv.buyContract(diffProp.id, diffProp.askPrice),
+          this.buyThroughGateway(matchProp.id, matchProp.askPrice),
+          this.buyThroughGateway(diffProp.id, diffProp.askPrice),
         ]);
         store.leg1.activeContractId = matchId;
         store.leg2.activeContractId = diffId;

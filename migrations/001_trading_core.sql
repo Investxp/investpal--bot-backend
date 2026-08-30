@@ -1,0 +1,13 @@
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+
+CREATE TABLE IF NOT EXISTS users (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), email text NOT NULL UNIQUE, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS accounts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL REFERENCES users(id), broker_id text NOT NULL, external_account_id text NOT NULL, account_type text NOT NULL CHECK (account_type IN ('demo', 'live')), currency text NOT NULL, status text NOT NULL DEFAULT 'disconnected', created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (broker_id, external_account_id));
+CREATE TABLE IF NOT EXISTS strategies (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL REFERENCES users(id), name text NOT NULL, status text NOT NULL DEFAULT 'experimental', created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS executions (id uuid PRIMARY KEY, user_id uuid REFERENCES users(id), account_id uuid REFERENCES accounts(id), strategy_id uuid REFERENCES strategies(id), broker_id text NOT NULL, broker_account_id text, idempotency_key text NOT NULL, state text NOT NULL, symbol text NOT NULL, contract_type text NOT NULL, stake numeric(20,8) NOT NULL CHECK (stake > 0), broker_contract_id text, result text, profit numeric(20,8), error text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE (account_id, idempotency_key));
+ALTER TABLE executions ADD COLUMN IF NOT EXISTS broker_account_id text;
+CREATE TABLE IF NOT EXISTS risk_events (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid REFERENCES users(id), account_id uuid REFERENCES accounts(id), execution_id uuid REFERENCES executions(id), decision text NOT NULL CHECK (decision IN ('approved', 'reduced', 'deferred', 'blocked')), reasons jsonb NOT NULL DEFAULT '[]'::jsonb, risk_score integer CHECK (risk_score BETWEEN 0 AND 100), created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS audit_logs (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid REFERENCES users(id), actor_id uuid, action text NOT NULL, correlation_id text, metadata jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS executions_account_created_idx ON executions(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS risk_events_account_created_idx ON risk_events(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS audit_logs_created_idx ON audit_logs(created_at DESC);

@@ -2,7 +2,8 @@ import { v4 as uuid } from 'uuid';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import type { TradeLog, TradeStats, RunnerState, TradeStatus, TradeConfig } from './types.js';
+import type { TradeLog, TradeStats, RunnerState, TradeStatus, TradeConfig, ExecutionRecord, ExecutionState } from './types.js';
+import type { PostgresExecutionPersistence } from './postgres-persistence.js';
 
 type CopyType = 'demo_to_demo' | 'demo_to_live' | 'live_to_live' | 'live_to_demo';
 export type { CopyType };
@@ -46,6 +47,11 @@ export class Store {
   leg1: RunnerState = { label: 'Leg 1', contractType: 'CALL', currentStake: 0, isTrading: false, activeContractId: null, lastResult: null, profit: 0 };
   leg2: RunnerState = { label: 'Leg 2', contractType: 'PUT', currentStake: 0, isTrading: false, activeContractId: null, lastResult: null, profit: 0 };
   leg3: RunnerState = { label: 'Leg 3', contractType: 'DIGITMATCH', currentStake: 0, isTrading: false, activeContractId: null, lastResult: null, profit: 0 };
+  private executions: ExecutionRecord[] = [];
+  private emergencyStopActive = false;
+  private readonly EXECUTION_FILE = path.resolve(process.env.EXECUTION_JOURNAL_PATH || 'executions.json');
+  private readonly CONTROL_FILE = path.resolve(process.env.TRADING_CONTROL_PATH || 'trading-control.json');
+  private executionPersistence: PostgresExecutionPersistence | null = null;
 
   private wsClients: Set<(data: TradeStatus) => void> = new Set();
   private logWsClients: Set<(log: TradeLog) => void> = new Set();
@@ -57,6 +63,11 @@ export class Store {
 
   // Copy pool reference (set from index.ts)
   copyPoolRef: { replicationTrade: (...args: any[]) => Promise<void>; resolveOutcomes: (...args: any[]) => Promise<void>; } | null = null;
+
+  constructor() {
+    this.loadExecutionJournal();
+    this.loadTradingControl();
+  }
 
   addLog(message: string, type: TradeLog['type'] = 'info') {
     const log: TradeLog = {
@@ -80,6 +91,98 @@ export class Store {
       leg2: this.leg2,
       leg3: this.leg3,
     };
+  }
+
+  beginExecution(input: Pick<ExecutionRecord, 'leg' | 'symbol' | 'contractType' | 'stake' | 'idempotencyKey'> & { accountId?: string | null }): ExecutionRecord {
+    const now = new Date().toISOString();
+    const execution: ExecutionRecord = {
+      executionId: uuid(), accountId: input.accountId ?? null, state: 'CREATED', ...input, contractId: null,
+      result: null, profit: null, createdAt: now, updatedAt: now, error: null,
+    };
+    this.executions.unshift(execution);
+    if (this.executions.length > 500) this.executions.pop();
+    this.persistExecutionJournal();
+    return execution;
+  }
+
+  updateExecution(executionId: string, state: ExecutionState, patch: Partial<Pick<ExecutionRecord, 'contractId' | 'result' | 'profit' | 'error'>> = {}) {
+    const execution = this.executions.find(item => item.executionId === executionId);
+    if (!execution) return;
+    Object.assign(execution, patch, { state, updatedAt: new Date().toISOString() });
+    this.persistExecutionJournal();
+  }
+
+  getExecutions(limit = 100) { return this.executions.slice(0, Math.max(1, Math.min(limit, 500))); }
+  getExecution(executionId: string) { return this.executions.find(execution => execution.executionId === executionId) ?? null; }
+
+  configureExecutionPersistence(persistence: PostgresExecutionPersistence) { this.executionPersistence = persistence; }
+
+  async restoreExecutions() {
+    if (!this.executionPersistence) return;
+    const restored = await this.executionPersistence.load();
+    if (restored.length > 0) this.executions = restored.slice(0, 500);
+  }
+
+  isEmergencyStopActive() { return this.emergencyStopActive; }
+
+  triggerEmergencyStop(reason = 'Emergency stop requested') {
+    this.emergencyStopActive = true;
+    this.persistTradingControl();
+    this.addLog(`[Risk] Emergency stop active: ${reason}`, 'error');
+    this.broadcast();
+  }
+
+  clearEmergencyStop() {
+    this.emergencyStopActive = false;
+    this.persistTradingControl();
+    this.addLog('[Risk] Emergency stop cleared', 'warn');
+    this.broadcast();
+  }
+
+  private loadExecutionJournal() {
+    try {
+      if (!fs.existsSync(this.EXECUTION_FILE)) return;
+      const parsed = JSON.parse(fs.readFileSync(this.EXECUTION_FILE, 'utf8'));
+      if (Array.isArray(parsed)) this.executions = parsed.slice(0, 500);
+    } catch { this.executions = []; }
+  }
+
+  private persistExecutionJournal() {
+    try {
+      const directory = path.dirname(this.EXECUTION_FILE);
+      fs.mkdirSync(directory, { recursive: true });
+      const temporary = `${this.EXECUTION_FILE}.tmp`;
+      fs.writeFileSync(temporary, JSON.stringify(this.executions), 'utf8');
+      fs.renameSync(temporary, this.EXECUTION_FILE);
+    } catch (error) {
+      this.addLog(`[Persistence] Execution journal unavailable: ${error instanceof Error ? error.message : 'unknown error'}`, 'error');
+    }
+    const latest = this.executions[0];
+    if (latest && this.executionPersistence) {
+      this.executionPersistence.upsert(latest).catch((error: unknown) => {
+        this.addLog(`[Persistence] PostgreSQL execution write failed: ${error instanceof Error ? error.message : 'unknown error'}`, 'error');
+      });
+    }
+  }
+
+  private loadTradingControl() {
+    try {
+      if (!fs.existsSync(this.CONTROL_FILE)) return;
+      const parsed = JSON.parse(fs.readFileSync(this.CONTROL_FILE, 'utf8'));
+      this.emergencyStopActive = parsed?.emergencyStopActive === true;
+    } catch { this.emergencyStopActive = false; }
+  }
+
+  private persistTradingControl() {
+    try {
+      const directory = path.dirname(this.CONTROL_FILE);
+      fs.mkdirSync(directory, { recursive: true });
+      const temporary = `${this.CONTROL_FILE}.tmp`;
+      fs.writeFileSync(temporary, JSON.stringify({ emergencyStopActive: this.emergencyStopActive, updatedAt: new Date().toISOString() }), 'utf8');
+      fs.renameSync(temporary, this.CONTROL_FILE);
+    } catch (error) {
+      this.addLog(`[Persistence] Trading control unavailable: ${error instanceof Error ? error.message : 'unknown error'}`, 'error');
+    }
   }
 
   subscribe(cb: (data: TradeStatus) => void) { this.wsClients.add(cb); }
