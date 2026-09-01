@@ -265,6 +265,7 @@ class CopyClient {
 export class CopyTradingPool {
   private clients = new Map<number, CopyClient>();
   private lastAttempt = new Map<number, number>();
+  private cachedCopyType = new Map<number, string>(); // Track copy_type to detect changes
   private resyncTimer: NodeJS.Timeout | null = null;
 
   /** Periodically re-sync so failed follower connections self-heal.
@@ -284,27 +285,41 @@ export class CopyTradingPool {
     const activeIds = new Set(followers.map(f => f.id));
     const now = Date.now();
 
+    // Remove clients for inactive followers
     for (const [fid, client] of this.clients) {
       if (!activeIds.has(fid)) {
         client.disconnect();
         this.clients.delete(fid);
         this.lastAttempt.delete(fid);
+        this.cachedCopyType.delete(fid);
       }
     }
 
     for (const f of followers) {
       const existing = this.clients.get(f.id);
-      // Already connected — leave it alone
-      if (existing && existing.connected) continue;
+      const cachedType = this.cachedCopyType.get(f.id);
+      
+      // ── Account Type Change Detection ──────────────────────────────────────
+      // Detect if copy_type has changed (e.g., user flipped 'demo_to_demo' → 'live_to_demo').
+      // This requires reconnection to resolve the PAT to the new account type.
+      // (For OAuth2 tokens with explicit accountId, the account won't change but
+      //  we still force reconnection for consistency.)
+      const copyTypeChanged = cachedType !== undefined && cachedType !== f.copy_type;
+      
+      // Already connected and copy_type unchanged — leave it alone
+      if (existing && existing.connected && !copyTypeChanged) continue;
 
       const lastTry = this.lastAttempt.get(f.id) ?? 0;
-      // Throttle reconnect attempts (never-drop PID protection + rate limits)
-      if (now - lastTry < 15000) continue;
+      // Throttle reconnect attempts to respect rate limits and backoff (15 second window).
+      // HOWEVER: bypass throttle if copy_type changed — user explicitly requested a change
+      // and we should attempt it immediately rather than wait for backoff to expire.
+      if (now - lastTry < 15000 && !copyTypeChanged) continue;
 
       // Drop a dead/hung client and retry fresh
       if (existing) { existing.disconnect(); }
       this.clients.delete(f.id);
       this.lastAttempt.set(f.id, now);
+      this.cachedCopyType.set(f.id, f.copy_type); // Update cached type
 
       const client = new CopyClient();
       // Map copy_type to preferred account type
@@ -315,7 +330,7 @@ export class CopyTradingPool {
         ? client.connect(f.token, 'pat', undefined, preferredAccountType)
         : client.connect(f.token, 'oauth2', f.oauth_account_id || undefined);
       connectPromise.then(() => {
-        store.addLog(`[CopyPool] Connected follower: ${f.name} (${f.id})`, 'success');
+        store.addLog(`[CopyPool] Connected follower: ${f.name} (${f.id})${copyTypeChanged ? ' [account type switched]' : ''}`, 'success');
       }).catch((err) => {
         store.addLog(`[CopyPool] Failed to connect follower ${f.name}: ${err.message}`, 'error');
         this.clients.delete(f.id);
@@ -326,6 +341,20 @@ export class CopyTradingPool {
 
   getClient(fid: number): CopyClient | undefined {
     return this.clients.get(fid);
+  }
+
+  /**
+   * Get detailed connection info for a follower.
+   * Used by API endpoints to report connection status after updates.
+   */
+  getConnectionInfo(fid: number): { connected: boolean; accountId: string | null; balance: number | null; currency: string } {
+    const client = this.getClient(fid);
+    return {
+      connected: client?.connected ?? false,
+      accountId: client?.accountId ?? null,
+      balance: client?.balance ?? null,
+      currency: client?.currency ?? 'USD',
+    };
   }
 
   async replicationTrade(

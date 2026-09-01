@@ -513,8 +513,11 @@ app.patch('/api/copy-followers/:id', (req, res) => {
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid follower ID' });
   const f = store.getFollowers().find(x => x.id === id);
   if (!f) return res.status(404).json({ error: 'Follower not found' });
+  
   const patch: any = {};
   const { copyType, copyRatio, maxStake, active } = req.body;
+  const copyTypeChanged = copyType !== undefined && copyType !== f.copy_type;
+  
   if (copyType !== undefined) {
     const valid: CopyType[] = ['demo_to_demo', 'demo_to_live', 'live_to_live', 'live_to_demo'];
     if (!valid.includes(copyType)) return res.status(400).json({ error: 'Invalid copyType' });
@@ -523,11 +526,33 @@ app.patch('/api/copy-followers/:id', (req, res) => {
   if (copyRatio !== undefined) patch.copy_ratio = Math.max(0, parseFloat(copyRatio) || 1);
   if (maxStake !== undefined) patch.max_stake = Math.max(0, parseFloat(maxStake) || f.max_stake);
   if (active !== undefined) patch.active = active ? 1 : 0;
+  
   const updated = store.updateFollower(id, patch);
   if (!updated) return res.status(404).json({ error: 'Follower not found' });
+  
+  // Force reconnection if copy_type changed to resolve to the new account type
+  if (copyTypeChanged) {
+    store.addLog(`[CopyPool] Copy type changed for follower ${f.name}: ${f.copy_type} → ${copyType}; forcing reconnection`, 'info');
+  }
+  
   copyPool.sync();
-  store.addLog(`[CopyPool] Updated follower ${f.name} (ID: ${id})`, 'info');
-  res.json({ status: 'SUCCESS', follower: store.getFollower(id) });
+  
+  // Gather connection info for response (may take a moment to establish)
+  const connInfo = copyPool.getConnectionInfo(id);
+  const updatedFollower = store.getFollower(id);
+  
+  store.addLog(`[CopyPool] Updated follower ${f.name} (ID: ${id})${copyTypeChanged ? ' with account type change' : ''}`, 'info');
+  res.json({ 
+    status: 'SUCCESS', 
+    follower: updatedFollower,
+    connection: {
+      connected: connInfo.connected,
+      accountId: connInfo.accountId,
+      balance: connInfo.balance,
+      currency: connInfo.currency,
+      accountTypeSwitchInProgress: copyTypeChanged && !connInfo.connected,
+    },
+  });
 });
 
 app.delete('/api/copy-followers/:id', (req, res) => {
